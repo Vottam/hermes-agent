@@ -138,6 +138,7 @@ class HermesAgentLoop:
         max_turns: int = 30,
         task_id: Optional[str] = None,
         temperature: float = 1.0,
+        top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         extra_body: Optional[Dict[str, Any]] = None,
         budget_config: Optional["BudgetConfig"] = None,
@@ -153,6 +154,7 @@ class HermesAgentLoop:
             max_turns: Maximum number of LLM calls before stopping
             task_id: Unique ID for terminal/browser session isolation
             temperature: Sampling temperature for generation
+            top_p: Nucleus sampling top_p (None = omit, use provider default)
             max_tokens: Max tokens per generation (None for server default)
             extra_body: Extra parameters passed to the OpenAI client's create() call.
                         Used for OpenRouter provider preferences, transforms, etc.
@@ -168,6 +170,7 @@ class HermesAgentLoop:
         self.max_turns = max_turns
         self.task_id = task_id or str(uuid.uuid4())
         self.temperature = temperature
+        self.top_p = top_p
         self.max_tokens = max_tokens
         self.extra_body = extra_body
         self.budget_config = budget_config or DEFAULT_BUDGET
@@ -210,6 +213,9 @@ class HermesAgentLoop:
                 "n": 1,
                 "temperature": self.temperature,
             }
+
+            if self.top_p is not None:
+                chat_kwargs["top_p"] = self.top_p
 
             # Only pass tools if we have them
             if self.tool_schemas:

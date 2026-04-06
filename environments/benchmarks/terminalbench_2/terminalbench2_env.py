@@ -52,18 +52,17 @@ _repo_root = Path(__file__).resolve().parent.parent.parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from pydantic import Field
-
 from atroposlib.envs.base import EvalHandlingEnum
 from atroposlib.envs.server_handling.server_manager import APIServerConfig
+from pydantic import Field
 
 from environments.agent_loop import AgentResult, HermesAgentLoop
 from environments.hermes_base_env import HermesAgentBaseEnv, HermesAgentEnvConfig
 from environments.tool_context import ToolContext
 from tools.terminal_tool import (
-    register_task_env_overrides,
-    clear_task_env_overrides,
     cleanup_vm,
+    clear_task_env_overrides,
+    register_task_env_overrides,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +71,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Configuration
 # =============================================================================
+
 
 class TerminalBench2EvalConfig(HermesAgentEnvConfig):
     """
@@ -138,10 +138,23 @@ class TerminalBench2EvalConfig(HermesAgentEnvConfig):
 
 # Tasks that cannot run properly on Modal and are excluded from scoring.
 MODAL_INCOMPATIBLE_TASKS = {
-    "qemu-startup",        # Needs KVM/hardware virtualization
-    "qemu-alpine-ssh",     # Needs KVM/hardware virtualization
-    "crack-7z-hash",       # Password brute-force -- too slow for cloud sandbox timeouts
+    "qemu-startup",  # Needs KVM/hardware virtualization
+    "qemu-alpine-ssh",  # Needs KVM/hardware virtualization
+    "crack-7z-hash",  # Password brute-force -- too slow for cloud sandbox timeouts
 }
+
+# Injected as a user message when the model responds with plain text instead of
+# calling a tool or including a <task_status> tag.
+_FORMAT_NUDGE_MESSAGE = (
+    "Your response must be one of the following:\n"
+    "1. A tool call (e.g. terminal, read_file, write_file) to continue working on the task.\n"
+    "2. <task_status>DONE</task_status> — if you have fully completed the task.\n"
+    "3. <task_status>UNFINISHED</task_status> — if you are unable to complete the task.\n\n"
+    "Plain text responses are not accepted. Please continue working or report your final status."
+)
+
+# Maximum number of format nudges before giving up and moving on to scoring.
+_MAX_FORMAT_NUDGES = 3
 
 
 # =============================================================================
@@ -203,7 +216,6 @@ def _safe_extract_tar(tar: tarfile.TarFile, target_dir: Path) -> None:
         except OSError:
             pass
 
-
 def _extract_base64_tar(b64_data: str, target_dir: Path):
     """Extract a base64-encoded tar.gz archive into target_dir."""
     if not b64_data:
@@ -217,6 +229,7 @@ def _extract_base64_tar(b64_data: str, target_dir: Path):
 # =============================================================================
 # Main Environment
 # =============================================================================
+
 
 class TerminalBench2EvalEnv(HermesAgentBaseEnv):
     """
@@ -262,23 +275,18 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             enabled_toolsets=["terminal", "file"],
             disabled_toolsets=None,
             distribution=None,
-
             # Agent settings -- TB2 tasks are complex, need many turns
             max_agent_turns=60,
             max_token_length=16000,
             agent_temperature=0.6,
             system_prompt=None,
-
             # Modal backend for per-task cloud-isolated sandboxes
             terminal_backend="modal",
-            terminal_timeout=300,   # 5 min per command (builds, pip install, etc.)
-
+            terminal_timeout=300,  # 5 min per command (builds, pip install, etc.)
             # Test execution timeout (TB2 test scripts can install deps like pytest)
             test_timeout=180,
-
             # 89 tasks run in parallel, each needs a thread for tool calls
             tool_pool_size=128,
-
             # --- Eval-only Atropos settings ---
             # These settings make the env work as an eval-only environment:
             #   - STOP_TRAIN: pauses training during eval (standard for eval envs)
@@ -288,7 +296,6 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             group_size=1,
             steps_per_eval=1,
             total_steps=1,
-
             tokenizer_name="NousResearch/Hermes-3-Llama-3.1-8B",
             use_wandb=True,
             wandb_name="terminal-bench-2",
@@ -336,7 +343,11 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
 
         # Skip tasks incompatible with the current backend (e.g., QEMU on Modal)
         # plus any user-specified skip_tasks
-        skip = set(MODAL_INCOMPATIBLE_TASKS) if self.config.terminal_backend == "modal" else set()
+        skip = (
+            set(MODAL_INCOMPATIBLE_TASKS)
+            if self.config.terminal_backend == "modal"
+            else set()
+        )
         if self.config.skip_tasks:
             skip |= {name.strip() for name in self.config.skip_tasks.split(",")}
         if skip:
@@ -344,7 +355,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             tasks = [t for t in tasks if t["task_name"] not in skip]
             skipped = before - len(tasks)
             if skipped > 0:
-                print(f"  Skipped {skipped} incompatible tasks: {sorted(skip & {t['task_name'] for t in ds})}")
+                print(
+                    f"  Skipped {skipped} incompatible tasks: {sorted(skip & {t['task_name'] for t in ds})}"
+                )
 
         self.all_eval_items = tasks
         self.iter = 0
@@ -371,24 +384,30 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         # immediately on completion so data is preserved even on Ctrl+C.
         # Timestamped filename so each run produces a unique file.
         import datetime
+
         log_dir = os.path.join(os.path.dirname(__file__), "logs")
         os.makedirs(log_dir, exist_ok=True)
         run_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = self.server.servers[0].config.model_name
         model_slug = model_name.replace("/", "_").replace(":", "_")
-        self._streaming_path = os.path.join(log_dir, f"samples_{run_ts}_{model_slug}.jsonl")
+        self._streaming_path = os.path.join(
+            log_dir, f"samples_{run_ts}_{model_slug}.jsonl"
+        )
         self._streaming_file = open(self._streaming_path, "w")
         self._streaming_lock = __import__("threading").Lock()
         self._run_meta = {
             "model_name": model_name,
             "temperature": self.config.agent_temperature,
+            "top_p": self.config.agent_top_p,
             "max_agent_turns": self.config.max_agent_turns,
             "task_timeout": self.config.task_timeout,
             "terminal_backend": self.config.terminal_backend,
         }
         print(f"  Streaming results to: {self._streaming_path}")
 
-        print(f"TB2 ready: {len(self.all_eval_items)} tasks across {len(self.category_index)} categories")
+        print(
+            f"TB2 ready: {len(self.all_eval_items)} tasks across {len(self.category_index)} categories"
+        )
         for cat, indices in sorted(self.category_index.items()):
             print(f"  {cat}: {len(indices)} tasks")
 
@@ -397,7 +416,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         if not hasattr(self, "_streaming_file") or self._streaming_file.closed:
             return
         with self._streaming_lock:
-            self._streaming_file.write(json.dumps(result, ensure_ascii=False, default=str) + "\n")
+            self._streaming_file.write(
+                json.dumps(result, ensure_ascii=False, default=str) + "\n"
+            )
             self._streaming_file.flush()
 
     # =========================================================================
@@ -495,7 +516,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             if dockerfile_path.exists():
                 logger.info(
                     "Task %s: building from Dockerfile (force_build=%s, docker_image=%s)",
-                    task_name, self.config.force_build, bool(docker_image),
+                    task_name,
+                    self.config.force_build,
+                    bool(docker_image),
                 )
                 return str(dockerfile_path), task_dir
 
@@ -503,11 +526,79 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         if docker_image:
             logger.warning(
                 "Task %s: force_build=True but no environment_tar, "
-                "falling back to docker_image %s", task_name, docker_image,
+                "falling back to docker_image %s",
+                task_name,
+                docker_image,
             )
             return docker_image, None
 
         return "", None
+
+    # =========================================================================
+    # Agent loop with format nudging
+    # =========================================================================
+
+    async def _run_with_nudges(
+        self,
+        server,
+        tools: List[Dict[str, Any]],
+        valid_names: set,
+        messages: List[Dict[str, Any]],
+        task_id: str,
+        task_name: str,
+    ) -> Tuple["AgentResult", int]:
+        """Run the agent loop, nudging if the model returns plain text without task_status tag."""
+        total_turns_used = 0
+        nudge_count = 0
+        result = None
+
+        while total_turns_used < self.config.max_agent_turns:
+            remaining = self.config.max_agent_turns - total_turns_used
+            agent = HermesAgentLoop(
+                server=server,
+                tool_schemas=tools,
+                valid_tool_names=valid_names,
+                max_turns=remaining,
+                task_id=task_id,
+                temperature=self.config.agent_temperature,
+                top_p=self.config.agent_top_p,
+                max_tokens=self.config.max_token_length,
+                extra_body=self.config.extra_body,
+            )
+            result = await agent.run(messages)
+            total_turns_used += result.turns_used
+
+            if not result.finished_naturally:
+                break
+
+            last_content = next(
+                (
+                    m.get("content", "") or ""
+                    for m in reversed(messages)
+                    if m.get("role") == "assistant"
+                ),
+                "",
+            )
+            if "<task_status>" in last_content:
+                break
+
+            if nudge_count >= _MAX_FORMAT_NUDGES:
+                logger.warning(
+                    "Task %s: model ignored %d format nudges; stopping.",
+                    task_name,
+                    nudge_count,
+                )
+                break
+            nudge_count += 1
+            logger.info(
+                "Task %s: nudging model (nudge %d/%d) — no tool calls and no task_status",
+                task_name,
+                nudge_count,
+                _MAX_FORMAT_NUDGES,
+            )
+            messages.append({"role": "user", "content": _FORMAT_NUDGE_MESSAGE})
+
+        return result, total_turns_used
 
     # =========================================================================
     # Per-task evaluation -- agent loop + test verification
@@ -537,6 +628,7 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         task_dir = None  # Set if we extract a Dockerfile (needs cleanup)
 
         from tqdm import tqdm
+
         tqdm.write(f"  [START] {task_name} (task_id={task_id[:8]})")
         task_start = time.time()
 
@@ -544,10 +636,14 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             # --- 1. Resolve Docker image ---
             modal_image, task_dir = self._resolve_task_image(eval_item, task_name)
             if not modal_image:
-                logger.error("Task %s: no docker_image or environment_tar, skipping", task_name)
+                logger.error(
+                    "Task %s: no docker_image or environment_tar, skipping", task_name
+                )
                 return {
-                    "passed": False, "reward": 0.0,
-                    "task_name": task_name, "category": category,
+                    "passed": False,
+                    "reward": 0.0,
+                    "task_name": task_name,
+                    "category": category,
                     "error": "no_image",
                 }
 
@@ -564,7 +660,8 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             register_task_env_overrides(task_id, overrides)
             logger.info(
                 "Task %s: registered image override for task_id %s",
-                task_name, task_id[:8],
+                task_name,
+                task_id[:8],
             )
 
             # --- 3. Resolve tools and build messages ---
@@ -572,53 +669,48 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
 
             messages: List[Dict[str, Any]] = []
             if self.config.system_prompt:
-                messages.append({"role": "system", "content": self.config.system_prompt})
+                messages.append(
+                    {"role": "system", "content": self.config.system_prompt}
+                )
             messages.append({"role": "user", "content": self.format_prompt(eval_item)})
 
-            # --- 4. Run agent loop ---
-            # Use ManagedServer (Phase 2) for vLLM/SGLang backends to get
-            # token-level tracking via /generate. Falls back to direct
-            # ServerManager (Phase 1) for OpenAI endpoints.
+            # --- 4. Run agent loop with format enforcement ---
+            # The model must either call a tool or end with <task_status>DONE/UNFINISHED</task_status>.
+            # If it returns plain text without the tag, inject a nudge user message and
+            # continue with the remaining turn budget (up to _MAX_FORMAT_NUDGES times).
             if self._use_managed_server():
                 async with self.server.managed_server(
                     tokenizer=self.tokenizer,
                     preserve_think_blocks=bool(self.config.thinking_mode),
                 ) as managed:
-                    agent = HermesAgentLoop(
+                    result, total_turns_used = await self._run_with_nudges(
                         server=managed,
-                        tool_schemas=tools,
-                        valid_tool_names=valid_names,
-                        max_turns=self.config.max_agent_turns,
+                        tools=tools,
+                        valid_names=valid_names,
+                        messages=messages,
                         task_id=task_id,
-                        temperature=self.config.agent_temperature,
-                        max_tokens=self.config.max_token_length,
-                        extra_body=self.config.extra_body,
-                        budget_config=self.config.build_budget_config(),
+                        task_name=task_name,
                     )
-                    result = await agent.run(messages)
             else:
-                agent = HermesAgentLoop(
+                result, total_turns_used = await self._run_with_nudges(
                     server=self.server,
-                    tool_schemas=tools,
-                    valid_tool_names=valid_names,
-                    max_turns=self.config.max_agent_turns,
+                    tools=tools,
+                    valid_names=valid_names,
+                    messages=messages,
                     task_id=task_id,
-                    temperature=self.config.agent_temperature,
-                    max_tokens=self.config.max_token_length,
-                    extra_body=self.config.extra_body,
-                    budget_config=self.config.build_budget_config(),
+                    task_name=task_name,
                 )
-                result = await agent.run(messages)
 
             # --- 5. Verify -- run test suite in the agent's sandbox ---
             # Skip verification if the agent produced no meaningful output
             only_system_and_user = all(
-                msg.get("role") in ("system", "user") for msg in result.messages
+                msg.get("role") in ("system", "user") for msg in messages
             )
-            if result.turns_used == 0 or only_system_and_user:
+            if total_turns_used == 0 or only_system_and_user:
                 logger.warning(
                     "Task %s: agent produced no output (turns=%d). Reward=0.",
-                    task_name, result.turns_used,
+                    task_name,
+                    total_turns_used,
                 )
                 reward = 0.0
             else:
@@ -630,7 +722,10 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
                     loop = asyncio.get_event_loop()
                     reward = await loop.run_in_executor(
                         None,  # default thread pool
-                        self._run_tests, eval_item, ctx, task_name,
+                        self._run_tests,
+                        eval_item,
+                        ctx,
+                        task_name,
                     )
                 except Exception as e:
                     logger.error("Task %s: test verification failed: %s", task_name, e)
@@ -641,10 +736,15 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             passed = reward == 1.0
             status = "PASS" if passed else "FAIL"
             elapsed = time.time() - task_start
-            tqdm.write(f"  [{status}] {task_name} (turns={result.turns_used}, {elapsed:.0f}s)")
+            tqdm.write(
+                f"  [{status}] {task_name} (turns={total_turns_used}, {elapsed:.0f}s)"
+            )
             logger.info(
                 "Task %s: reward=%.1f, turns=%d, finished=%s",
-                task_name, reward, result.turns_used, result.finished_naturally,
+                task_name,
+                reward,
+                total_turns_used,
+                result.finished_naturally,
             )
 
             out = {
@@ -653,9 +753,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
                 "reward": reward,
                 "task_name": task_name,
                 "category": category,
-                "turns_used": result.turns_used,
+                "turns_used": total_turns_used,
                 "finished_naturally": result.finished_naturally,
-                "messages": result.messages,
+                "messages": messages,
             }
             self._save_result(out)
             return out
@@ -666,8 +766,10 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             tqdm.write(f"  [ERROR] {task_name}: {e} ({elapsed:.0f}s)")
             out = {
                 **self._run_meta,
-                "passed": False, "reward": 0.0,
-                "task_name": task_name, "category": category,
+                "passed": False,
+                "reward": 0.0,
+                "task_name": task_name,
+                "category": category,
                 "error": str(e),
             }
             self._save_result(out)
@@ -740,7 +842,8 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         # Execute the test suite
         logger.info(
             "Task %s: running test suite (timeout=%ds)",
-            task_name, self.config.test_timeout,
+            task_name,
+            self.config.test_timeout,
         )
         test_result = ctx.terminal(
             "bash /tests/test.sh",
@@ -773,7 +876,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
                         logger.warning(
                             "Task %s: reward.txt content unexpected (%r), "
                             "falling back to exit_code=%d",
-                            task_name, content, exit_code,
+                            task_name,
+                            content,
+                            exit_code,
                         )
                         reward = 1.0 if exit_code == 0 else 0.0
             else:
@@ -781,14 +886,17 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
                 logger.warning(
                     "Task %s: reward.txt not found after download, "
                     "falling back to exit_code=%d",
-                    task_name, exit_code,
+                    task_name,
+                    exit_code,
                 )
                 reward = 1.0 if exit_code == 0 else 0.0
         except Exception as e:
             logger.warning(
                 "Task %s: failed to download verifier dir: %s, "
                 "falling back to exit_code=%d",
-                task_name, e, exit_code,
+                task_name,
+                e,
+                exit_code,
             )
             reward = 1.0 if exit_code == 0 else 0.0
         finally:
@@ -799,7 +907,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             output_preview = output[-500:] if output else "(no output)"
             logger.info(
                 "Task %s: FAIL (exit_code=%d)\n%s",
-                task_name, exit_code, output_preview,
+                task_name,
+                exit_code,
+                output_preview,
             )
 
         return reward
@@ -824,13 +934,18 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             )
         except asyncio.TimeoutError:
             from tqdm import tqdm
+
             elapsed = self.config.task_timeout
-            tqdm.write(f"  [TIMEOUT] {task_name} (exceeded {elapsed}s wall-clock limit)")
+            tqdm.write(
+                f"  [TIMEOUT] {task_name} (exceeded {elapsed}s wall-clock limit)"
+            )
             logger.error("Task %s: wall-clock timeout after %ds", task_name, elapsed)
             out = {
                 **self._run_meta,
-                "passed": False, "reward": 0.0,
-                "task_name": task_name, "category": category,
+                "passed": False,
+                "reward": 0.0,
+                "task_name": task_name,
+                "category": category,
                 "error": f"timeout ({elapsed}s)",
             }
             self._save_result(out)
@@ -864,23 +979,25 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
                     self.handleError(record)
 
         handler = _TqdmHandler()
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-            datefmt="%H:%M:%S",
-        ))
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
         root = logging.getLogger()
         root.handlers = [handler]  # Replace any existing handlers
         root.setLevel(logging.INFO)
 
         # Silence noisy third-party loggers that flood the output
-        logging.getLogger("httpx").setLevel(logging.WARNING)      # Every HTTP request
-        logging.getLogger("openai").setLevel(logging.WARNING)     # OpenAI client retries
-        logging.getLogger("rex-deploy").setLevel(logging.WARNING) # Swerex deployment
+        logging.getLogger("httpx").setLevel(logging.WARNING)  # Every HTTP request
+        logging.getLogger("openai").setLevel(logging.WARNING)  # OpenAI client retries
+        logging.getLogger("rex-deploy").setLevel(logging.WARNING)  # Swerex deployment
         logging.getLogger("rex_image_builder").setLevel(logging.WARNING)  # Image builds
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("Starting Terminal-Bench 2.0 Evaluation")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"  Dataset: {self.config.dataset_name}")
         print(f"  Total tasks: {len(self.all_eval_items)}")
         print(f"  Max agent turns: {self.config.max_agent_turns}")
@@ -888,9 +1005,11 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         print(f"  Terminal backend: {self.config.terminal_backend}")
         print(f"  Tool thread pool: {self.config.tool_pool_size}")
         print(f"  Terminal timeout: {self.config.terminal_timeout}s/cmd")
-        print(f"  Terminal lifetime: {self.config.terminal_lifetime}s (auto: task_timeout + 120)")
+        print(
+            f"  Terminal lifetime: {self.config.terminal_lifetime}s (auto: task_timeout + 120)"
+        )
         print(f"  Max concurrent tasks: {self.config.max_concurrent_tasks}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         # Semaphore to limit concurrent Modal sandbox creations.
         # Without this, all 86 tasks fire simultaneously, each creating a Modal
@@ -932,6 +1051,7 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             await asyncio.gather(*eval_tasks, return_exceptions=True)
             # Belt-and-suspenders: clean up any remaining sandboxes
             from tools.terminal_tool import cleanup_all_environments
+
             cleanup_all_environments()
             print("All sandboxes cleaned up.")
             return
@@ -977,9 +1097,9 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         self.eval_metrics = [(k, v) for k, v in eval_metrics.items()]
 
         # ---- Print summary ----
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("Terminal-Bench 2.0 Evaluation Results")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Overall Pass Rate: {overall_pass_rate:.4f} ({passed}/{total})")
         print(f"Evaluation Time: {end_time - start_time:.1f} seconds")
 
@@ -999,7 +1119,7 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
             extra = f" (error: {error})" if error else ""
             print(f"  [{status}] {r['task_name']} (turns={turns}){extra}")
 
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         # Build sample records for evaluate_log (includes full conversations)
         samples = [
@@ -1024,6 +1144,7 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
                 end_time=end_time,
                 generation_parameters={
                     "temperature": self.config.agent_temperature,
+                    "top_p": self.config.agent_top_p,
                     "max_tokens": self.config.max_token_length,
                     "max_agent_turns": self.config.max_agent_turns,
                     "terminal_backend": self.config.terminal_backend,
@@ -1040,6 +1161,7 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         # Kill all remaining sandboxes. Timed-out tasks leave orphaned thread
         # pool workers still executing commands -- cleanup_all stops them.
         from tools.terminal_tool import cleanup_all_environments
+
         print("\nCleaning up all sandboxes...")
         cleanup_all_environments()
 
@@ -1047,6 +1169,7 @@ class TerminalBench2EvalEnv(HermesAgentBaseEnv):
         # tasks are killed immediately instead of retrying against dead
         # sandboxes and spamming the console with TimeoutError warnings.
         from environments.agent_loop import _tool_executor
+
         _tool_executor.shutdown(wait=False, cancel_futures=True)
         print("Done.")
 
