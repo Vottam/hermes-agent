@@ -321,8 +321,20 @@ def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypa
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
             return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="abc123deadbeef\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "origin/main"]:
+            return SimpleNamespace(stdout="def456deadbeef\n", stderr="", returncode=0)
+        if cmd == ["git", "status", "--porcelain"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "--reverse", "origin/main..HEAD"]:
+            return SimpleNamespace(stdout="c1\n", stderr="", returncode=0)
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "update-ref", "refs/hermes/update-rescue/20260101-000000-abc123de", "abc123deadbeef"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd[:2] == ["git", "cherry"]:
+            return SimpleNamespace(stdout="- c1\n", stderr="", returncode=0)
         if cmd == ["git", "pull", "origin", "main"]:
             return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
         if cmd == ["/usr/bin/uv", "pip", "install", "-e", ".[all]", "--quiet"]:
@@ -366,8 +378,20 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
             return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="abc123deadbeef\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "origin/main"]:
+            return SimpleNamespace(stdout="def456deadbeef\n", stderr="", returncode=0)
+        if cmd == ["git", "status", "--porcelain"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "--reverse", "origin/main..HEAD"]:
+            return SimpleNamespace(stdout="c1\n", stderr="", returncode=0)
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "update-ref", "refs/hermes/update-rescue/20260101-000000-abc123de", "abc123deadbeef"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd[:2] == ["git", "cherry"]:
+            return SimpleNamespace(stdout="- c1\n", stderr="", returncode=0)
         if cmd == ["git", "pull", "origin", "main"]:
             return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
         return SimpleNamespace(returncode=0)
