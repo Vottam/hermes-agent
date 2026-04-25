@@ -55,8 +55,8 @@ class TestCmdUpdateBranchFallback:
 
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
-        # rev-list should use origin/main, not origin/fix/stoicneko
-        rev_list_cmds = [c for c in commands if "rev-list" in c]
+        # The update-count check should use origin/main, not origin/fix/stoicneko.
+        rev_list_cmds = [c for c in commands if "HEAD..origin/main --count" in c]
         assert len(rev_list_cmds) == 1
         assert "origin/main" in rev_list_cmds[0]
         assert "origin/fix/stoicneko" not in rev_list_cmds[0]
@@ -79,7 +79,7 @@ class TestCmdUpdateBranchFallback:
 
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
-        rev_list_cmds = [c for c in commands if "rev-list" in c]
+        rev_list_cmds = [c for c in commands if "HEAD..origin/main --count" in c]
         assert len(rev_list_cmds) == 1
         assert "origin/main" in rev_list_cmds[0]
 
