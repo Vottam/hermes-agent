@@ -48,6 +48,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -5268,6 +5269,92 @@ def _update_via_zip(args):
     print("✓ Update complete!")
 
 
+@dataclass(frozen=True)
+class UpdateSnapshot:
+    head_before: str
+    branch_before: str
+    upstream_ref: str
+    upstream_head_before: str
+    status_short: str
+    ahead_commits: list[str]
+    ahead_count: int
+    dirty_tree: bool
+
+
+def collect_update_snapshot(
+    git_cmd: list[str], cwd: Path, upstream_ref: str = "origin/main"
+) -> UpdateSnapshot:
+    branch_before = subprocess.run(
+        git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    head_before = subprocess.run(
+        git_cmd + ["rev-parse", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    upstream_head_before = subprocess.run(
+        git_cmd + ["rev-parse", upstream_ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    status_short = subprocess.run(
+        git_cmd + ["status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    ahead_commits = subprocess.run(
+        git_cmd + ["rev-list", "--reverse", f"{upstream_ref}..HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    ahead_count = len(ahead_commits)
+    dirty_tree = bool(status_short)
+    return UpdateSnapshot(
+        head_before=head_before,
+        branch_before=branch_before,
+        upstream_ref=upstream_ref,
+        upstream_head_before=upstream_head_before,
+        status_short=status_short,
+        ahead_commits=ahead_commits,
+        ahead_count=ahead_count,
+        dirty_tree=dirty_tree,
+    )
+
+
+def create_update_rescue_ref(
+    git_cmd: list[str],
+    cwd: Path,
+    snapshot: UpdateSnapshot,
+    prefix: str = "refs/hermes/update-rescue",
+) -> str | None:
+    if snapshot.ahead_count == 0:
+        return None
+
+    from datetime import datetime, timezone
+
+    rescue_ref = f"{prefix}/{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{snapshot.head_before[:8]}"
+    subprocess.run(
+        git_cmd + ["update-ref", rescue_ref, snapshot.head_before],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return rescue_ref
+
+
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     status = subprocess.run(
         git_cmd + ["status", "--porcelain"],
@@ -6274,6 +6361,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         # Always update against main
         branch = "main"
+
+        update_snapshot = collect_update_snapshot(git_cmd, PROJECT_ROOT)
+        update_rescue_ref = create_update_rescue_ref(
+            git_cmd, PROJECT_ROOT, update_snapshot
+        )
 
         # If user is on a non-main branch or detached HEAD, switch to main
         if current_branch != "main":
