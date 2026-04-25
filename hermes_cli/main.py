@@ -5640,6 +5640,91 @@ def replay_missing_update_commits(
     )
 
 
+def _format_update_commit_list(commits: list[str]) -> str:
+    if not commits:
+        return "none"
+    short_commits = ", ".join(commit[:8] for commit in commits)
+    return f"{len(commits)} ({short_commits})"
+
+
+def _collect_update_final_report(
+    git_cmd: list[str],
+    cwd: Path,
+    update_snapshot: UpdateSnapshot,
+    update_rescue_ref: str | None,
+    replay_result: UpdateReplayResult,
+    auto_stash_ref: str | None,
+    gateway_service_health: str,
+) -> dict[str, object]:
+    final_head_result = subprocess.run(
+        git_cmd + ["rev-parse", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    final_head = getattr(final_head_result, "stdout", "").strip() or "unknown"
+
+    final_status_result = subprocess.run(
+        git_cmd + ["status", "--short", "--branch"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    final_git_status = getattr(final_status_result, "stdout", "").strip() or "clean"
+
+    return {
+        "old_head": update_snapshot.head_before,
+        "new_head": final_head,
+        "target_ref": update_snapshot.upstream_ref,
+        "rescue_ref": update_rescue_ref,
+        "local_commits_preserved": list(update_snapshot.ahead_commits),
+        "local_commits_skipped": list(replay_result.skipped_commits),
+        "local_commits_replayed": list(replay_result.replayed_commits),
+        "replay_conflict_commit": replay_result.conflicted_commit,
+        "autostash_ref_preserved": auto_stash_ref,
+        "final_git_status": final_git_status,
+        "gateway_service_health": gateway_service_health,
+    }
+
+
+def _print_update_final_report(report: dict[str, object]) -> None:
+    print()
+    print("Update report")
+    print(f"  Old HEAD: {report.get('old_head') or 'unknown'}")
+    print(f"  New HEAD: {report.get('new_head') or 'unknown'}")
+    print(f"  Target ref: {report.get('target_ref') or 'unknown'}")
+    print(f"  Rescue ref: {report.get('rescue_ref') or 'none'}")
+    print(
+        f"  Local commits preserved: {_format_update_commit_list(list(report.get('local_commits_preserved') or []))}"
+    )
+    print(
+        "  Local commits skipped as upstream-equivalent: "
+        f"{_format_update_commit_list(list(report.get('local_commits_skipped') or []))}"
+    )
+    print(
+        f"  Local commits replayed: {_format_update_commit_list(list(report.get('local_commits_replayed') or []))}"
+    )
+    print(
+        f"  Replay conflict commit: {report.get('replay_conflict_commit') or 'none'}"
+    )
+    print(
+        "  Autostash ref preserved: "
+        f"{report.get('autostash_ref_preserved') or 'none'}"
+    )
+    print("  Final git status:")
+    final_git_status = str(report.get('final_git_status') or 'clean')
+    if final_git_status == "clean":
+        print("    clean")
+    else:
+        for line in final_git_status.splitlines():
+            print(f"    {line}")
+    print(
+        f"  Gateway/service health: {report.get('gateway_service_health') or 'not reached'}"
+    )
+
+
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
     status = subprocess.run(
         git_cmd + ["status", "--porcelain"],
@@ -6850,6 +6935,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print(
                 f"✗ Failed to replay local commits during update (conflict at {replay_result.conflicted_commit})."
             )
+            _print_update_final_report(
+                _collect_update_final_report(
+                    git_cmd,
+                    PROJECT_ROOT,
+                    update_snapshot,
+                    update_rescue_ref,
+                    replay_result,
+                    auto_stash_ref,
+                    "not reached",
+                )
+            )
             sys.exit(1)
 
         _invalidate_update_cache()
@@ -7084,6 +7180,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 _exit_code_path.write_text("0")
             except OSError:
                 pass
+
+        gateway_service_health = "not available"
 
         # Auto-restart ALL gateways after update.
         # The code update (git pull) is shared across all profiles, so every
@@ -7412,6 +7510,18 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         except Exception as e:
             logger.debug("Gateway restart during update failed: %s", e)
+        else:
+            if restarted_services or killed_pids:
+                health_parts = []
+                if restarted_services:
+                    health_parts.append(
+                        f"restarted: {', '.join(restarted_services)}"
+                    )
+                if killed_pids:
+                    health_parts.append(
+                        f"stopped manual gateway process(es): {len(killed_pids)}"
+                    )
+                gateway_service_health = "; ".join(health_parts)
 
         # Warn if legacy Hermes gateway unit files are still installed.
         # When both hermes.service (from a pre-rename install) and the
@@ -7445,6 +7555,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Warn about stale dashboard processes — the dashboard has no
         # service manager, so we can only tell the user to restart them.
         _warn_stale_dashboard_processes()
+        _print_update_final_report(
+            _collect_update_final_report(
+                git_cmd,
+                PROJECT_ROOT,
+                update_snapshot,
+                update_rescue_ref,
+                replay_result,
+                auto_stash_ref,
+                gateway_service_health,
+            )
+        )
 
         print()
         print("Tip: You can now select a provider and model:")
