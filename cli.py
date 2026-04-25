@@ -6358,10 +6358,10 @@ class HermesCLI:
                 _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
-        elif canonical == "voice":
-            self._handle_voice_command(cmd_original)
         elif canonical == "busy":
             self._handle_busy_command(cmd_original)
+        elif canonical == "voice":
+            self._handle_voice_command(cmd_original)
         else:
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
@@ -7922,6 +7922,30 @@ class HermesCLI:
         else:
             _cprint(f"Unknown voice subcommand: {subcommand}")
             _cprint("Usage: /voice [on|off|tts|status]")
+
+    def _handle_busy_command(self, command: str):
+        """Handle /busy [queue|interrupt|status] command."""
+        parts = command.strip().split(maxsplit=1)
+        arg = parts[1].lower().strip() if len(parts) > 1 else "status"
+
+        if arg == "status":
+            _cprint(f"  Busy input mode: {self.busy_input_mode}")
+            _cprint(
+                f"  Enter while busy: {'queues for next turn' if self.busy_input_mode == 'queue' else 'interrupts current run'}"
+            )
+            _cprint("  Usage: /busy [queue|interrupt|status]")
+            return
+
+        if arg not in {"queue", "interrupt"}:
+            _cprint(f"  Unknown busy subcommand: {arg}")
+            _cprint("  Usage: /busy [queue|interrupt|status]")
+            return
+
+        self.busy_input_mode = arg
+        if save_config_value("display.busy_input_mode", arg):
+            _cprint(f"  Busy input mode set to: {arg} (saved)")
+        else:
+            _cprint(f"  Busy input mode set to: {arg}")
 
     def _voice_beeps_enabled(self) -> bool:
         """Return whether CLI voice mode should play record start/stop beeps."""
