@@ -212,6 +212,9 @@ def test_update_preflight_runs_before_destructive_update_operation(
         if cmd == ["git", "status", "--porcelain"]:
             order.append("status")
             return _cp(cmd, stdout="")
+        if cmd == ["git", "status", "--short", "--branch"]:
+            order.append("status-branch")
+            return _cp(cmd, stdout="## main...origin/main [ahead 1]\n")
         if cmd == ["git", "rev-list", "--reverse", "origin/main..HEAD"]:
             order.append("ahead")
             return _cp(cmd, stdout="c1\n")

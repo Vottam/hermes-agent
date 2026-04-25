@@ -176,6 +176,7 @@ class TestCmdUpdateBranchFallback:
 @patch("hermes_cli.main._build_web_ui")
 @patch("hermes_cli.main._sync_with_upstream_if_needed")
 @patch("hermes_cli.main._finalize_update_output")
+@patch("hermes_cli.main._print_update_final_report")
 @patch("hermes_cli.main._install_hangup_protection", return_value={})
 @patch("hermes_cli.main._get_origin_url", return_value="git@github.com:NousResearch/hermes-agent.git")
 @patch("hermes_cli.main._is_fork", return_value=False)
@@ -187,6 +188,7 @@ def test_update_replay_failure_stops_before_post_update_side_effects(
     mock_is_fork,
     mock_get_origin_url,
     mock_install_hangup,
+    mock_print_report,
     mock_finalize_output,
     mock_sync_upstream,
     mock_build_web,
@@ -222,6 +224,12 @@ def test_update_replay_failure_stops_before_post_update_side_effects(
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="main\n", stderr="")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="def456deadbeef\n", stderr="")
+        if cmd == ["git", "status", "--short", "--branch"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="## main...origin/main [ahead 1]\n", stderr=""
+            )
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="1\n", stderr="")
         if cmd == ["git", "pull", "--ff-only", "origin", "main"]:
@@ -241,4 +249,8 @@ def test_update_replay_failure_stops_before_post_update_side_effects(
     mock_install_python_deps.assert_not_called()
     mock_update_node_deps.assert_not_called()
     mock_build_web.assert_not_called()
+    mock_print_report.assert_called_once()
+    report = mock_print_report.call_args.args[0]
+    assert report["gateway_service_health"] == "not reached"
+    assert report["replay_conflict_commit"] == "c1"
     mock_finalize_output.assert_called_once()
