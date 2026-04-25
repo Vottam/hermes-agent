@@ -5281,6 +5281,14 @@ class UpdateSnapshot:
     dirty_tree: bool
 
 
+@dataclass(frozen=True)
+class UpdateReplayResult:
+    skipped_commits: list[str]
+    replayed_commits: list[str]
+    conflicted_commit: str | None
+    succeeded: bool
+
+
 def collect_update_snapshot(
     git_cmd: list[str], cwd: Path, upstream_ref: str = "origin/main"
 ) -> UpdateSnapshot:
@@ -5353,6 +5361,76 @@ def create_update_rescue_ref(
         check=True,
     )
     return rescue_ref
+
+
+def replay_missing_update_commits(
+    git_cmd: list[str],
+    cwd: Path,
+    update_snapshot: UpdateSnapshot,
+    update_rescue_ref: str | None,
+) -> UpdateReplayResult:
+    if update_rescue_ref is None:
+        return UpdateReplayResult(
+            skipped_commits=[],
+            replayed_commits=[],
+            conflicted_commit=None,
+            succeeded=True,
+        )
+
+    cherry_result = subprocess.run(
+        git_cmd + ["cherry", "origin/main", update_rescue_ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    cherry_status: dict[str, str] = {}
+    for line in cherry_result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        cherry_status[line[1:].strip()] = line[0]
+
+    skipped_commits: list[str] = []
+    replay_candidates: list[str] = []
+    for commit in update_snapshot.ahead_commits:
+        status = cherry_status.get(commit)
+        if status == "-":
+            skipped_commits.append(commit)
+        elif status == "+":
+            replay_candidates.append(commit)
+
+    replayed_commits: list[str] = []
+    for commit in replay_candidates:
+        pick_result = subprocess.run(
+            git_cmd + ["cherry-pick", commit],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if pick_result.returncode != 0:
+            subprocess.run(
+                git_cmd + ["cherry-pick", "--abort"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return UpdateReplayResult(
+                skipped_commits=skipped_commits,
+                replayed_commits=replayed_commits,
+                conflicted_commit=commit,
+                succeeded=False,
+            )
+        replayed_commits.append(commit)
+
+    return UpdateReplayResult(
+        skipped_commits=skipped_commits,
+        replayed_commits=replayed_commits,
+        conflicted_commit=None,
+        succeeded=True,
+    )
 
 
 def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[str]:
@@ -6473,6 +6551,15 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         prompt_user=prompt_for_restore,
                         input_fn=gw_input_fn,
                     )
+
+        replay_result = replay_missing_update_commits(
+            git_cmd, PROJECT_ROOT, update_snapshot, update_rescue_ref
+        )
+        if not replay_result.succeeded:
+            print(
+                f"✗ Failed to replay local commits during update (conflict at {replay_result.conflicted_commit})."
+            )
+            sys.exit(1)
 
         _invalidate_update_cache()
 
