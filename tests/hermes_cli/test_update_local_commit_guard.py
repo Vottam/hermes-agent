@@ -203,6 +203,24 @@ def test_update_preflight_runs_before_destructive_update_operation(
         if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
             order.append("branch")
             return _cp(cmd, stdout="feature/topic\n")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            order.append("head")
+            return _cp(cmd, stdout="abc123deadbeef\n")
+        if cmd == ["git", "rev-parse", "origin/main"]:
+            order.append("origin")
+            return _cp(cmd, stdout="def456deadbeef\n")
+        if cmd == ["git", "status", "--porcelain"]:
+            order.append("status")
+            return _cp(cmd, stdout="")
+        if cmd == ["git", "rev-list", "--reverse", "origin/main..HEAD"]:
+            order.append("ahead")
+            return _cp(cmd, stdout="c1\n")
+        if cmd == ["git", "update-ref", "refs/hermes/update-rescue/20260101-000000-abc123de", "abc123deadbeef"]:
+            order.append("update-ref")
+            return _cp(cmd)
+        if cmd == ["git", "cherry", "origin/main", "refs/hermes/update-rescue/20260101-000000-abc123de"]:
+            order.append("cherry")
+            return _cp(cmd, stdout="- c1\n")
         if cmd == ["git", "checkout", "main"]:
             order.append("checkout")
             return _cp(cmd)
