@@ -329,6 +329,63 @@ class TestPostSetup:
 
         profile_env = user_home / ".hindsight" / "profiles" / "hermes.env"
         assert profile_env.exists()
+        assert (hermes_home / ".env").read_text() == "HINDSIGHT_LLM_API_KEY=existing-key\nHINDSIGHT_TIMEOUT=120\n"
+        assert "HINDSIGHT_API_LLM_API_KEY=existing-key\n" in profile_env.read_text()
+
+    def test_local_embedded_setup_preserves_existing_key_from_nondefault_profile_env_when_input_left_blank(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+
+        selections = iter([1, 0])  # local_embedded, openai
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        provider = HindsightMemoryProvider()
+        provider.save_config({"profile": "coder"}, str(hermes_home))
+
+        profile_env = user_home / ".hindsight" / "profiles" / "coder.env"
+        profile_env.parent.mkdir(parents=True, exist_ok=True)
+        profile_env.write_text("HINDSIGHT_API_LLM_API_KEY=existing-key\n")
+
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        assert (hermes_home / ".env").read_text() == "HINDSIGHT_LLM_API_KEY=existing-key\nHINDSIGHT_TIMEOUT=120\n"
+        assert "HINDSIGHT_API_LLM_API_KEY=existing-key\n" in profile_env.read_text()
+
+    def test_local_embedded_setup_ignores_nondict_saved_config_when_input_left_blank(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+
+        selections = iter([1, 0])  # local_embedded, openai
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        config_path = hermes_home / "hindsight" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("[]")
+
+        env_path = hermes_home / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text("HINDSIGHT_LLM_API_KEY=existing-key\n")
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        profile_env = user_home / ".hindsight" / "profiles" / "hermes.env"
+        assert profile_env.exists()
+        assert (hermes_home / ".env").read_text() == "HINDSIGHT_LLM_API_KEY=existing-key\nHINDSIGHT_TIMEOUT=120\n"
         assert "HINDSIGHT_API_LLM_API_KEY=existing-key\n" in profile_env.read_text()
 
 

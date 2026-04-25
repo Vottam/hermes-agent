@@ -478,7 +478,9 @@ class HindsightMemoryProvider(MemoryProvider):
         existing = {}
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text())
+                parsed = json.loads(config_path.read_text())
+                if isinstance(parsed, dict):
+                    existing = parsed
             except Exception:
                 pass
         existing.update(values)
@@ -589,12 +591,35 @@ class HindsightMemoryProvider(MemoryProvider):
             val = input(f"  LLM model [{default_model}]: ").strip()
             provider_config["llm_model"] = val or default_model
 
-            sys.stdout.write("  LLM API key: ")
+            existing_llm_key = os.environ.get("HINDSIGHT_LLM_API_KEY", "")
+            if not existing_llm_key:
+                existing_llm_key = _load_simple_env(Path(hermes_home) / ".env").get(
+                    "HINDSIGHT_LLM_API_KEY",
+                    "",
+                )
+            if not existing_llm_key:
+                saved_config = dict(provider_config)
+                config_path = Path(hermes_home) / "hindsight" / "config.json"
+                try:
+                    parsed = json.loads(config_path.read_text(encoding="utf-8"))
+                    if isinstance(parsed, dict):
+                        saved_config.update(parsed)
+                except Exception:
+                    pass
+                saved_config.update(provider_config)
+                existing_llm_key = _load_simple_env(
+                    _embedded_profile_env_path(saved_config)
+                ).get("HINDSIGHT_API_LLM_API_KEY", "")
+
+            if existing_llm_key:
+                masked = f"...{existing_llm_key[-4:]}" if len(existing_llm_key) > 4 else "set"
+                sys.stdout.write(f"  LLM API key (current: {masked}, blank to keep): ")
+            else:
+                sys.stdout.write("  LLM API key: ")
             sys.stdout.flush()
             llm_key = getpass.getpass(prompt="") if sys.stdin.isatty() else sys.stdin.readline().strip()
-            # Always write explicitly (including empty) so the provider sees ""
-            # rather than a missing variable.  The daemon reads from .env at
-            # startup and fails when HINDSIGHT_LLM_API_KEY is unset.
+            if not llm_key and existing_llm_key:
+                llm_key = existing_llm_key
             env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key
 
         # Step 4: Save everything
