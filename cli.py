@@ -2315,7 +2315,13 @@ class HermesCLI:
         # _try_activate_fallback() switches provider/model.
         agent = getattr(self, "agent", None)
         model_name = (getattr(agent, "model", None) or self.model or "unknown")
-        model_short = model_name.split("/")[-1] if "/" in model_name else model_name
+        # Preserve explicit alias-style model names such as @preset/hermes.
+        # Those are user-facing routing identifiers, not path-like names, so
+        # stripping the prefix would hide the actual active route in the TUI.
+        if model_name.startswith("@"):
+            model_short = model_name
+        else:
+            model_short = model_name.split("/")[-1] if "/" in model_name else model_name
         if model_short.endswith(".gguf"):
             model_short = model_short[:-5]
         if len(model_short) > 26:
