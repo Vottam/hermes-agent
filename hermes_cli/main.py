@@ -5800,36 +5800,10 @@ def _restore_stashed_changes(
         # skill sync, and gateway restart.
         return False
 
-    stash_selector = _resolve_stash_selector(git_cmd, cwd, stash_ref)
-    if stash_selector is None:
-        print(
-            "⚠ Local changes were restored, but Hermes couldn't find the stash entry to drop."
-        )
-        print(
-            "  The stash was left in place. You can remove it manually after checking the result."
-        )
-        _print_stash_cleanup_guidance(stash_ref)
-    else:
-        drop = subprocess.run(
-            git_cmd + ["stash", "drop", stash_selector],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-        )
-        if drop.returncode != 0:
-            print(
-                "⚠ Local changes were restored, but Hermes couldn't drop the saved stash entry."
-            )
-            if drop.stdout.strip():
-                print(drop.stdout.strip())
-            if drop.stderr.strip():
-                print(drop.stderr.strip())
-            print(
-                "  The stash was left in place. You can remove it manually after checking the result."
-            )
-            _print_stash_cleanup_guidance(stash_ref, stash_selector)
-
-    print("⚠ Local changes were restored on top of the updated codebase.")
+    print("✓ Local changes were restored on top of the updated codebase.")
+    print("  The stash was preserved for manual cleanup later.")
+    print(f"  Stash ref: {stash_ref}")
+    print("  Remove it later with: git stash drop <stash@{N}>")
     print("  Review `git diff` / `git status` if Hermes behaves unexpectedly.")
     return True
 
