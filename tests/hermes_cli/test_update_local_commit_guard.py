@@ -227,6 +227,9 @@ def test_update_preflight_runs_before_destructive_update_operation(
         if cmd == ["git", "checkout", "main"]:
             order.append("checkout")
             return _cp(cmd)
+        if cmd == ["git", "checkout", "feature/topic"]:
+            order.append("restore-branch")
+            return _cp(cmd)
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             order.append("count")
             return _cp(cmd, stdout="1\n")
@@ -240,8 +243,8 @@ def test_update_preflight_runs_before_destructive_update_operation(
     args = SimpleNamespace(gateway=False)
     cmd_update(args)
 
-    assert order.index("collect") < order.index("checkout")
-    assert order.index("rescue") < order.index("checkout")
+    assert order.index("checkout") < order.index("collect")
+    assert order.index("collect") < order.index("rescue")
     assert order.index("checkout") < order.index("pull")
     mock_collect_snapshot.assert_called_once()
     mock_create_rescue_ref.assert_called_once()
