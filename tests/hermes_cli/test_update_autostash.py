@@ -349,6 +349,7 @@ def _make_update_side_effect(
     commit_count="3",
     ff_only_fails=False,
     reset_fails=False,
+    restore_branch_fails=False,
     fetch_fails=False,
     fetch_stderr="",
 ):
@@ -364,7 +365,15 @@ def _make_update_side_effect(
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return SimpleNamespace(stdout=f"{current_branch}\n", stderr="", returncode=0)
-        if "checkout" in joined and "main" in joined:
+        if cmd == ["git", "checkout", "main"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if current_branch not in ("main", "HEAD") and cmd == ["git", "checkout", current_branch]:
+            if restore_branch_fails:
+                return SimpleNamespace(
+                    stdout="",
+                    stderr=f"fatal: could not switch to {current_branch}\n",
+                    returncode=128,
+                )
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if "rev-list" in joined:
             return SimpleNamespace(stdout=f"{commit_count}\n", stderr="", returncode=0)
@@ -437,6 +446,55 @@ def test_cmd_update_switches_to_main_from_feature_branch(monkeypatch, tmp_path, 
     out = capsys.readouterr().out
     assert "fix/something" in out
     assert "switching to main" in out
+
+
+def test_cmd_update_restores_original_branch_after_success(monkeypatch, tmp_path):
+    """When on a feature branch, successful update returns to the original branch."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    side_effect, recorded = _make_update_side_effect(current_branch="fix/something")
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    commands = [" ".join(str(part) for part in cmd) for cmd in recorded]
+    main_checkout_idx = next(i for i, cmd in enumerate(commands) if "git checkout main" in cmd)
+    rev_list_idx = next(i for i, cmd in enumerate(commands) if "git rev-list HEAD..origin/main --count" in cmd)
+    report_status_idx = next(i for i, cmd in enumerate(commands) if cmd == "git status --short --branch")
+    branch_checkout_idx = next(i for i, cmd in enumerate(commands) if "git checkout fix/something" in cmd)
+
+    assert main_checkout_idx < rev_list_idx
+    assert rev_list_idx < report_status_idx
+    assert report_status_idx < branch_checkout_idx
+
+
+def test_cmd_update_fails_loudly_when_branch_restore_fails(monkeypatch, tmp_path, capsys):
+    """If restoring the original branch fails, update should stop before stash restore."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    side_effect, recorded = _make_update_side_effect(
+        current_branch="fix/something",
+        restore_branch_fails=True,
+    )
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    restore_calls = []
+
+    def fake_restore(*args, **kwargs):
+        restore_calls.append((args, kwargs))
+
+    monkeypatch.setattr(hermes_main, "_restore_stashed_changes", fake_restore)
+
+    with pytest.raises(SystemExit):
+        hermes_main.cmd_update(SimpleNamespace())
+
+    out = capsys.readouterr().out
+    assert "failed to restore original branch" in out
+    assert not restore_calls
+    commands = [" ".join(str(part) for part in cmd) for cmd in recorded]
+    assert any("git checkout fix/something" in cmd for cmd in commands)
 
 
 def test_cmd_update_switches_to_main_from_detached_head(monkeypatch, tmp_path, capsys):

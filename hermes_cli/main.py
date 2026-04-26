@@ -6886,13 +6886,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Always update against main
         branch = "main"
 
-        update_snapshot = collect_update_snapshot(git_cmd, PROJECT_ROOT)
-        update_rescue_ref = create_update_rescue_ref(
-            git_cmd, PROJECT_ROOT, update_snapshot
-        )
+        switched_from_original_branch = current_branch != "main"
 
         # If user is on a non-main branch or detached HEAD, switch to main
-        if current_branch != "main":
+        # before collecting the update snapshot so the replay logic only sees
+        # commits from the branch we are actually updating.
+        if switched_from_original_branch:
             label = (
                 "detached HEAD"
                 if current_branch == "HEAD"
@@ -6910,6 +6909,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
             )
         else:
             auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+
+        update_snapshot = collect_update_snapshot(git_cmd, PROJECT_ROOT)
+        update_rescue_ref = create_update_rescue_ref(
+            git_cmd, PROJECT_ROOT, update_snapshot
+        )
 
         prompt_for_restore = auto_stash_ref is not None and (
             gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty())
@@ -7641,17 +7645,44 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Warn about stale dashboard processes — the dashboard has no
         # service manager, so we can only tell the user to restart them.
         _warn_stale_dashboard_processes()
-        _print_update_final_report(
-            _collect_update_final_report(
+
+        final_report = _collect_update_final_report(
+            git_cmd,
+            PROJECT_ROOT,
+            update_snapshot,
+            update_rescue_ref,
+            replay_result,
+            auto_stash_ref,
+            gateway_service_health,
+        )
+
+        if switched_from_original_branch and current_branch != "HEAD":
+            restore_branch_result = subprocess.run(
+                git_cmd + ["checkout", current_branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if restore_branch_result.returncode != 0:
+                print(
+                    f"⚠ Update completed, but failed to restore original branch '{current_branch}'."
+                )
+                if restore_branch_result.stderr.strip():
+                    print(f"  {restore_branch_result.stderr.strip()}")
+                _print_update_final_report(final_report)
+                sys.exit(1)
+
+        if auto_stash_ref is not None:
+            _restore_stashed_changes(
                 git_cmd,
                 PROJECT_ROOT,
-                update_snapshot,
-                update_rescue_ref,
-                replay_result,
                 auto_stash_ref,
-                gateway_service_health,
+                prompt_user=prompt_for_restore,
+                input_fn=gw_input_fn,
             )
-        )
+
+        _print_update_final_report(final_report)
 
         print()
         print("Tip: You can now select a provider and model:")
