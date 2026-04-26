@@ -9672,6 +9672,25 @@ Examples:
         action="store_true",
         help="Emit machine-readable JSON instead of human output",
     )
+    _maintain_parser = memory_sub.add_parser(
+        "maintain",
+        help="Read-only maintenance planner for built-in memory and fact store",
+        description=(
+            "Generate a read-only maintenance plan for MEMORY.md, USER.md, the "
+            "fact store, session_search, and installed skills.\n\n"
+            "This command does not write anything."
+        ),
+    )
+    _maintain_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compatibility flag; the maintainer is always read-only",
+    )
+    _maintain_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human output",
+    )
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)
@@ -9734,6 +9753,10 @@ Examples:
             from hermes_cli.memory_doctor import cmd_memory_doctor
 
             cmd_memory_doctor(args)
+        elif sub == "maintain":
+            from hermes_cli.memory_maintain import cmd_memory_maintain
+
+            cmd_memory_maintain(args)
         else:
             from hermes_cli.memory_setup import memory_command
 
