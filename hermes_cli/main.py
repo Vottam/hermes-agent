@@ -9278,6 +9278,11 @@ Examples:
         action="store_true",
         help="Emit machine-readable JSON instead of human output",
     )
+    _maintain_parser.add_argument(
+        "--apply-safe",
+        action="store_true",
+        help="Apply only conservative, allowlisted maintenance actions",
+    )
     _report_parser = memory_sub.add_parser(
         "report",
         help="Inspect read-only memory maintenance reports",
