@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,32 @@ USER_CRIT_RATIO = 0.90
 LOW_TRUST_THRESHOLD = 0.30
 LOW_TRUST_LIMIT = 20
 SENSITIVE_LIMIT = 20
+TOP_ENTITIES_LIMIT = 20
+MUTABLE_FACT_BUCKET_LIMIT = 10
+MUTABLE_FACT_BUCKETS = (
+    ("7-29d", 7, 29),
+    ("30-89d", 30, 89),
+    ("90+d", 90, None),
+)
+MUTABLE_KEYWORDS = (
+    "current",
+    "active",
+    "version",
+    "port",
+    "path",
+    "url",
+    "endpoint",
+    "service",
+    "enabled",
+    "disabled",
+    "config",
+    "model",
+    "provider",
+    "token",
+    "key",
+    "secret",
+    "password",
+)
 
 _SENSITIVE_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.I), "private key block"),
@@ -133,6 +160,134 @@ def _classify_sensitive(content: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _field_keyword_matches(*values: str) -> list[str]:
+    haystack = " ".join(v.lower() for v in values if v)
+    matches: list[str] = []
+    for keyword in MUTABLE_KEYWORDS:
+        if re.search(rf"\b{re.escape(keyword)}\b", haystack):
+            matches.append(keyword)
+    return matches
+
+
+def _parse_sqlite_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _age_days_from_timestamp(value: Any, *, now: Optional[datetime] = None) -> Optional[int]:
+    ts = _parse_sqlite_timestamp(value)
+    if ts is None:
+        return None
+    now = now or datetime.utcnow()
+    delta = now - ts.replace(tzinfo=None)
+    return max(delta.days, 0)
+
+
+def _build_stale_bucket_items(rows: list[sqlite3.Row], bucket: tuple[str, int, Optional[int]], *, now: Optional[datetime] = None) -> dict[str, Any]:
+    label, min_days, max_days = bucket
+    now = now or datetime.utcnow()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        age_days = _age_days_from_timestamp(row["updated_at"] or row["created_at"], now=now)
+        if age_days is None or age_days < min_days:
+            continue
+        if max_days is not None and age_days > max_days:
+            continue
+        keywords = _field_keyword_matches(
+            str(row["content"] or ""),
+            str(row["category"] or ""),
+            str(row["tags"] or ""),
+        )
+        if not keywords:
+            continue
+        items.append(
+            {
+                "fact_id": int(row["fact_id"]),
+                "age_days": age_days,
+                "keywords": keywords[:4],
+                "fields": [
+                    field
+                    for field, value in (
+                        ("content", row["content"]),
+                        ("category", row["category"]),
+                        ("tags", row["tags"]),
+                    )
+                    if _field_keyword_matches(str(value or ""))
+                ],
+            }
+        )
+    items.sort(key=lambda item: (-item["age_days"], item["fact_id"]))
+    return {
+        "bucket": label,
+        "min_age_days": min_days,
+        "max_age_days": max_days,
+        "count": len(items),
+        "items": items[:MUTABLE_FACT_BUCKET_LIMIT],
+    }
+
+
+def _collect_top_entities_report(conn: sqlite3.Connection) -> dict[str, Any]:
+    if not _table_exists(conn, "entities") or not _table_exists(conn, "fact_entities"):
+        return {"count": TOP_ENTITIES_LIMIT, "items": []}
+
+    rows = conn.execute(
+        """
+        SELECT e.entity_id, e.name, COUNT(*) AS fact_count
+        FROM entities e
+        JOIN fact_entities fe ON fe.entity_id = e.entity_id
+        GROUP BY e.entity_id, e.name
+        ORDER BY fact_count DESC, e.entity_id ASC
+        LIMIT ?
+        """,
+        (TOP_ENTITIES_LIMIT,),
+    ).fetchall()
+    return {
+        "count": TOP_ENTITIES_LIMIT,
+        "items": [
+            {
+                "entity_id": int(row["entity_id"]),
+                "entity": str(row["name"] or ""),
+                "fact_count": int(row["fact_count"]),
+            }
+            for row in rows
+        ],
+    }
+
+
+def _collect_stale_mutable_facts_report(conn: sqlite3.Connection) -> dict[str, Any]:
+    if not _table_exists(conn, "facts"):
+        return {"total": 0, "buckets": []}
+
+    rows = conn.execute(
+        "SELECT fact_id, content, category, tags, created_at, updated_at FROM facts ORDER BY fact_id ASC"
+    ).fetchall()
+    buckets = [
+        _build_stale_bucket_items(rows, bucket)
+        for bucket in MUTABLE_FACT_BUCKETS
+    ]
+    return {
+        "total": sum(bucket["count"] for bucket in buckets),
+        "buckets": buckets,
+    }
+
+
 def _collect_fact_store_report(home: Path, limit: int = SENSITIVE_LIMIT) -> dict[str, Any]:
     db_path = home / "memory_store.db"
     report: dict[str, Any] = {
@@ -145,6 +300,8 @@ def _collect_fact_store_report(home: Path, limit: int = SENSITIVE_LIMIT) -> dict
         "facts_without_entity_pct": 0.0,
         "low_trust_threshold": LOW_TRUST_THRESHOLD,
         "low_trust_facts": {"count": 0, "items": []},
+        "top_entities": {"count": TOP_ENTITIES_LIMIT, "items": []},
+        "stale_mutable_facts": {"total": 0, "buckets": []},
         "sensitive_facts": [],
     }
 
@@ -211,6 +368,9 @@ def _collect_fact_store_report(home: Path, limit: int = SENSITIVE_LIMIT) -> dict
                 )
         else:
             report["status"] = _merge_status(report["status"], "warning")
+
+        report["top_entities"] = _collect_top_entities_report(conn)
+        report["stale_mutable_facts"] = _collect_stale_mutable_facts_report(conn)
 
         if _table_exists(conn, "facts"):
             sensitive: list[dict[str, Any]] = []
@@ -378,6 +538,30 @@ def format_memory_doctor_report(report: dict[str, Any]) -> str:
         lines.append(
             f"    - fact_id={item.get('fact_id')} type={item.get('type')} reason={item.get('reason')}"
         )
+    lines.append("")
+
+    top_entities = fact.get("top_entities", {})
+    lines.append("top_entities")
+    lines.append(f"  limit: {top_entities.get('count', TOP_ENTITIES_LIMIT)}")
+    lines.append(f"  items: {len(top_entities.get('items', []))}")
+    for item in top_entities.get("items", [])[:TOP_ENTITIES_LIMIT]:
+        lines.append(
+            f"    - entity={item.get('entity')} fact_count={item.get('fact_count')} entity_id={item.get('entity_id')}"
+        )
+    lines.append("")
+
+    stale = fact.get("stale_mutable_facts", {})
+    lines.append("stale_mutable_facts")
+    lines.append(f"  total: {stale.get('total', 0)}")
+    for bucket in stale.get("buckets", []):
+        label = bucket.get("bucket")
+        lines.append(
+            f"  {label}: {bucket.get('count', 0)} (age {bucket.get('min_age_days')}..{bucket.get('max_age_days') or '+'} days)"
+        )
+        for item in bucket.get("items", [])[:MUTABLE_FACT_BUCKET_LIMIT]:
+            lines.append(
+                f"    - fact_id={item.get('fact_id')} age≈{item.get('age_days')}d keywords={','.join(item.get('keywords', []))} fields={','.join(item.get('fields', []))}"
+            )
     lines.append("")
 
     session = report["session_search"]
