@@ -9240,6 +9240,26 @@ Examples:
         help="Which store to reset: 'all' (default), 'memory', or 'user'",
     )
 
+    _doctor_parser = memory_sub.add_parser(
+        "doctor",
+        help="Read-only audit of built-in memory, fact store, sessions, and skills",
+        description=(
+            "Run a read-only inventory of MEMORY.md, USER.md, the holographic "
+            "fact store, session_search, and installed skills.\n\n"
+            "This command does not write anything."
+        ),
+    )
+    _doctor_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compatibility flag; the doctor is always read-only",
+    )
+    _doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human output",
+    )
+
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)
         if sub == "off":
@@ -9297,6 +9317,10 @@ Examples:
                 f"\n  Memory reset complete. New sessions will start with a blank slate."
             )
             print(f"  Files were in: {display_hermes_home()}/memories/\n")
+        elif sub == "doctor":
+            from hermes_cli.memory_doctor import cmd_memory_doctor
+
+            cmd_memory_doctor(args)
         else:
             from hermes_cli.memory_setup import memory_command
 
