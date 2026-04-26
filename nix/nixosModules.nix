@@ -32,9 +32,6 @@
       else cfg.package.override { inherit (cfg) extraPythonPackages; };
     hermes-agent = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
-    # Derive a human-readable plugin name from a derivation.
-    pluginName = plugin: lib.getName plugin;
-
     # Deep-merge config type (from 0xrsydn/nix-hermes-agent)
     deepConfigType = lib.types.mkOptionType {
       name = "hermes-config-attrs";
@@ -635,7 +632,7 @@
       # ── Assertions ─────────────────────────────────────────────────────
       {
         assertions = let
-          names = map pluginName cfg.extraPlugins;
+          names = map lib.getName cfg.extraPlugins;
         in [{
           assertion = (lib.length names) == (lib.length (lib.unique names));
           message = "services.hermes-agent.extraPlugins: duplicate plugin names detected: ${toString names}. If using fetchFromGitHub, set name = \"plugin-name\" to disambiguate.";
@@ -685,7 +682,7 @@
           find ${cfg.stateDir}/.hermes -maxdepth 1 \
             \( -name "*.db" -o -name "*.db-wal" -o -name "*.db-shm" -o -name "SOUL.md" \) \
             -exec chmod g+rw {} + 2>/dev/null || true
-          for _subdir in cron sessions logs memories; do
+          for _subdir in cron sessions logs memories plugins; do
             mkdir -p "${cfg.stateDir}/.hermes/$_subdir"
             chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/.hermes/$_subdir"
             chmod 2770 "${cfg.stateDir}/.hermes/$_subdir"
@@ -796,18 +793,12 @@ HERMES_NIX_ENV_EOF
           '') cfg.documents)}
 
         # ── Declarative plugins ─────────────────────────────────────────
-        mkdir -p ${cfg.stateDir}/.hermes/plugins
-        chown ${cfg.user}:${cfg.group} ${cfg.stateDir}/.hermes/plugins
-        chmod 2770 ${cfg.stateDir}/.hermes/plugins
-
         # Remove stale managed symlinks (plugins removed from config)
-        for link in ${cfg.stateDir}/.hermes/plugins/nix-managed-*; do
-          [ -L "$link" ] && rm -f "$link"
-        done
+        find ${cfg.stateDir}/.hermes/plugins -maxdepth 1 -type l -name 'nix-managed-*' -delete 2>/dev/null || true
 
         ${lib.concatStringsSep "\n" (map (plugin:
           let
-            name = pluginName plugin;
+            name = lib.getName plugin;
           in ''
             if [ ! -f "${plugin}/plugin.yaml" ]; then
               echo "ERROR: extraPlugins entry '${plugin}' has no plugin.yaml" >&2
