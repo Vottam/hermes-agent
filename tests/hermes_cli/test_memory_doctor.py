@@ -4,6 +4,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,9 @@ def doctor_env(tmp_path, monkeypatch):
         skill_dir = skills_root / skill_name
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\n---\n", encoding="utf-8")
+
+    def ts(days_ago: int) -> str:
+        return (datetime.utcnow() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
 
     memory_db = hermes_home / "memory_store.db"
     conn = sqlite3.connect(memory_db)
@@ -63,18 +67,24 @@ def doctor_env(tmp_path, monkeypatch):
         """
     )
     conn.executemany(
-        "INSERT INTO facts(content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
+        "INSERT INTO facts(content, category, tags, trust_score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
         [
-            ("ordinary preference about documentation", "general", "", 0.9),
-            ("api token sk-abc123abc123abc123abc123abc123", "general", "", 0.5),
-            ("low confidence note", "general", "", 0.2),
+            ("ordinary preference about documentation", "general", "", 0.9, ts(0), ts(0)),
+            ("api token sk-abcdefghijklmnopqrstuvwxyz1234", "general", "", 0.5, ts(0), ts(0)),
+            ("low confidence note", "general", "", 0.2, ts(0), ts(0)),
+            ("operational note", "general", "current,path,enabled", 0.6, ts(10), ts(10)),
+            ("current service endpoint version", "general", "", 0.7, ts(40), ts(40)),
+            ("legacy provider config note", "general", "provider,config,active", 0.8, ts(100), ts(100)),
         ],
     )
     conn.executemany(
         "INSERT INTO entities(name, entity_type, aliases) VALUES (?, ?, ?)",
         [("DocEntity", "project", ""), ("UserEntity", "person", "")],
     )
-    conn.execute("INSERT INTO fact_entities(fact_id, entity_id) VALUES (1, 1)")
+    conn.executemany(
+        "INSERT INTO fact_entities(fact_id, entity_id) VALUES (?, ?)",
+        [(1, 1), (2, 1), (3, 1), (4, 2), (5, 2)],
+    )
     conn.commit()
     conn.close()
 
@@ -125,11 +135,20 @@ def test_memory_doctor_builds_read_only_inventory(doctor_env):
     assert report["memory"]["size_bytes"] == len("memory note\n".encode("utf-8"))
     assert report["memory"]["status"] == "ok"
     assert report["user"]["status"] == "warning"
-    assert report["fact_store"]["facts"] == 3
+    assert report["fact_store"]["facts"] == 6
     assert report["fact_store"]["entities"] == 2
-    assert report["fact_store"]["facts_without_entity"] == 2
+    assert report["fact_store"]["facts_without_entity"] == 1
     assert report["fact_store"]["low_trust_facts"]["count"] == 1
     assert report["fact_store"]["sensitive_facts"]
+    assert report["fact_store"]["top_entities"]["items"][0]["entity"] == "DocEntity"
+    assert report["fact_store"]["top_entities"]["items"][0]["fact_count"] == 3
+    buckets = {item["bucket"]: item for item in report["fact_store"]["stale_mutable_facts"]["buckets"]}
+    assert buckets["7-29d"]["count"] == 1
+    assert buckets["30-89d"]["count"] == 1
+    assert buckets["90+d"]["count"] == 1
+    assert buckets["7-29d"]["items"][0]["keywords"]
+    assert buckets["30-89d"]["items"][0]["age_days"] >= 30
+    assert buckets["90+d"]["items"][0]["age_days"] >= 90
     assert report["session_search"]["sessions"] == 2
     assert report["session_search"]["messages"] == 5
     assert report["skills"]["skill_docs"] == 2
@@ -142,10 +161,13 @@ def test_memory_doctor_human_output_redacts_sensitive_content(doctor_env, capsys
     out = capsys.readouterr().out
 
     assert report["overall_status"] in {"warning", "critical"}
-    assert "sk-abc123abc123abc123abc123abc123" not in out
+    assert "sk-abcdefghijklmnopqrstuvwxyz1234" not in out
     assert "api token" not in out.lower()
     assert "fact_id=" in out
     assert "possible_sensitive_facts" in out
+    assert "top_entities" in out
+    assert "stale_mutable_facts" in out
+    assert "current service endpoint version" not in out
 
 
 def test_memory_doctor_main_dispatch_json(doctor_env, monkeypatch, capsys):
@@ -161,3 +183,5 @@ def test_memory_doctor_main_dispatch_json(doctor_env, monkeypatch, capsys):
     assert payload["user"]["limit_bytes"] == 100
     assert payload["session_search"]["sessions"] == 2
     assert payload["skills"]["skill_docs"] == 2
+    assert payload["fact_store"]["top_entities"]["items"][0]["entity"] == "DocEntity"
+    assert payload["fact_store"]["stale_mutable_facts"]["buckets"][0]["count"] == 1
