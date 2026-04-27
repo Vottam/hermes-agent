@@ -145,6 +145,10 @@ def test_launch_tui_exports_model_and_provider(monkeypatch, main_mod):
     assert env["HERMES_INFERENCE_MODEL"] == "nous/hermes-test"
     assert env["HERMES_TUI_PROVIDER"] == "nous"
     assert env["HERMES_INFERENCE_PROVIDER"] == "nous"
+    active_path = Path(env["HERMES_TUI_ACTIVE_SESSION_FILE"])
+    assert active_path.name.startswith("hermes-tui-active-session-")
+    assert active_path.suffix == ".json"
+    assert not active_path.exists()
 
 
 def test_print_tui_exit_summary_includes_resume_and_token_totals(monkeypatch, capsys):
