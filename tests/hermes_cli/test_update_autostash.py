@@ -452,8 +452,24 @@ def test_cmd_update_restores_original_branch_after_success(monkeypatch, tmp_path
     """When on a feature branch, successful update returns to the original branch."""
     _setup_update_mocks(monkeypatch, tmp_path)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(
+        hermes_main, "_stash_local_changes_if_needed",
+        lambda *a, **kw: "abc123deadbeef",
+    )
 
     side_effect, recorded = _make_update_side_effect(current_branch="fix/something")
+
+    restore_trace = []
+
+    def fake_restore(*args, **kwargs):
+        assert any(
+            cmd[0:2] == ["git", "checkout"] and cmd[-1] == "fix/something"
+            for cmd in recorded
+        )
+        restore_trace.append("restore")
+        return True
+
+    monkeypatch.setattr(hermes_main, "_restore_stashed_changes", fake_restore)
     monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
 
     hermes_main.cmd_update(SimpleNamespace())
@@ -461,12 +477,13 @@ def test_cmd_update_restores_original_branch_after_success(monkeypatch, tmp_path
     commands = [" ".join(str(part) for part in cmd) for cmd in recorded]
     main_checkout_idx = next(i for i, cmd in enumerate(commands) if "git checkout main" in cmd)
     rev_list_idx = next(i for i, cmd in enumerate(commands) if "git rev-list HEAD..origin/main --count" in cmd)
-    report_status_idx = next(i for i, cmd in enumerate(commands) if cmd == "git status --short --branch")
     branch_checkout_idx = next(i for i, cmd in enumerate(commands) if "git checkout fix/something" in cmd)
+    report_status_idx = next(i for i, cmd in enumerate(commands) if cmd == "git status --short --branch")
 
     assert main_checkout_idx < rev_list_idx
-    assert rev_list_idx < report_status_idx
-    assert report_status_idx < branch_checkout_idx
+    assert rev_list_idx < branch_checkout_idx
+    assert branch_checkout_idx < report_status_idx
+    assert restore_trace == ["restore"]
 
 
 def test_cmd_update_fails_loudly_when_branch_restore_fails(monkeypatch, tmp_path, capsys):
@@ -524,21 +541,28 @@ def test_cmd_update_restores_stash_and_branch_when_already_up_to_date(monkeypatc
         hermes_main, "_stash_local_changes_if_needed",
         lambda *a, **kw: "abc123deadbeef",
     )
-    restore_calls = []
-    monkeypatch.setattr(
-        hermes_main, "_restore_stashed_changes",
-        lambda *a, **kw: restore_calls.append(1) or True,
-    )
 
     side_effect, recorded = _make_update_side_effect(
         current_branch="fix/something", commit_count="0",
     )
+
+    trace = []
+
+    def fake_restore(*args, **kw):
+        assert any(
+            cmd[0:2] == ["git", "checkout"] and cmd[-1] == "fix/something"
+            for cmd in recorded
+        )
+        trace.append("restore")
+        return True
+
+    monkeypatch.setattr(hermes_main, "_restore_stashed_changes", fake_restore)
     monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
 
     hermes_main.cmd_update(SimpleNamespace())
 
     # Stash should have been restored
-    assert len(restore_calls) == 1
+    assert trace == ["restore"]
 
     # Should have checked out back to the original branch
     checkout_back = [c for c in recorded if "checkout" in c and "fix/something" in c]
