@@ -4954,7 +4954,7 @@ class AIAgent:
         _validate_proxy_env_urls()
         _validate_base_url(client_kwargs.get("base_url"))
         if self.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
-            from agent.copilot_acp_client import CopilotACPClient
+            from acp_adapter.copilot_client import CopilotACPClient
 
             client = CopilotACPClient(**client_kwargs)
             logger.info(
@@ -7518,7 +7518,85 @@ class AIAgent:
         # ── chat_completions (default) ─────────────────────────────────────
         _ct = self._get_transport()
 
-        # Provider detection flags
+        # ── Provider profile path (all chat_completions providers) ─────────
+        # Profiles handle per-provider quirks via hooks. We compute the shared
+        # per-call context here and pass it through so hooks can use it.
+        try:
+            from providers import get_provider_profile
+            _profile = get_provider_profile(self.provider)
+        except Exception:
+            _profile = None
+
+        if _profile:
+            _ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
+            if _ephemeral_out is not None:
+                self._ephemeral_max_output_tokens = None
+
+            # Per-call context for profile hooks — mirrors the legacy flag block.
+            # Computed here so profiles receive live per-call values (not stale).
+            _prefs: Dict[str, Any] = {}
+            if self.providers_allowed:
+                _prefs["only"] = self.providers_allowed
+            if self.providers_ignored:
+                _prefs["ignore"] = self.providers_ignored
+            if self.providers_order:
+                _prefs["order"] = self.providers_order
+            if self.provider_sort:
+                _prefs["sort"] = self.provider_sort
+            if self.provider_require_parameters:
+                _prefs["require_parameters"] = True
+            if self.provider_data_collection:
+                _prefs["data_collection"] = self.provider_data_collection
+
+            _is_or = self._is_openrouter_url()
+            _is_nous = "nousresearch" in self._base_url_lower
+            _ant_max = None
+            if (_is_or or _is_nous) and "claude" in (self.model or "").lower():
+                try:
+                    from agent.anthropic_adapter import _get_anthropic_max_output
+                    _ant_max = _get_anthropic_max_output(self.model)
+                except Exception:
+                    pass
+
+            _is_gh = (
+                base_url_host_matches(self._base_url_lower, "models.github.ai")
+                or base_url_host_matches(self._base_url_lower, "api.githubcopilot.com")
+            )
+
+            _is_qwen = self._is_qwen_portal()
+            _qwen_meta = None
+            if _is_qwen:
+                _qwen_meta = {
+                    "sessionId": self.session_id or "hermes",
+                    "promptId": str(uuid.uuid4()),
+                }
+
+            return _ct.build_kwargs(
+                model=self.model,
+                messages=api_messages,
+                tools=self.tools,
+                timeout=self._resolved_api_call_timeout(),
+                max_tokens=self.max_tokens,
+                ephemeral_max_output_tokens=_ephemeral_out,
+                max_tokens_param_fn=self._max_tokens_param,
+                reasoning_config=self.reasoning_config,
+                request_overrides=self.request_overrides,
+                session_id=getattr(self, "session_id", None),
+                provider_profile=_profile,
+                ollama_num_ctx=self._ollama_num_ctx,
+                # Context forwarded to profile hooks:
+                provider_preferences=_prefs or None,
+                anthropic_max_output=_ant_max,
+                supports_reasoning=self._supports_reasoning_extra_body(),
+                github_reasoning_extra=self._github_models_reasoning_extra_body() if _is_gh else None,
+                qwen_session_metadata=_qwen_meta,
+                qwen_prepare_fn=self._qwen_prepare_chat_messages if _is_qwen else None,
+                qwen_prepare_inplace_fn=self._qwen_prepare_chat_messages_inplace if _is_qwen else None,
+            )
+
+        # ── Legacy flag path ────────────────────────────────────────────
+        # Reached only when get_provider_profile() returns None (unknown
+        # provider not yet in providers/ registry).
         _is_qwen = self._is_qwen_portal()
         _is_or = self._is_openrouter_url()
         _is_gh = (
@@ -7526,7 +7604,6 @@ class AIAgent:
             or base_url_host_matches(self._base_url_lower, "api.githubcopilot.com")
         )
         _is_nous = "nousresearch" in self._base_url_lower
-        _is_nvidia = "integrate.api.nvidia.com" in self._base_url_lower
         _is_kimi = (
             base_url_host_matches(self.base_url, "api.kimi.com")
             or base_url_host_matches(self.base_url, "moonshot.ai")
@@ -7598,7 +7675,6 @@ class AIAgent:
             is_nous=_is_nous,
             is_qwen_portal=_is_qwen,
             is_github_models=_is_gh,
-            is_nvidia_nim=_is_nvidia,
             is_kimi=_is_kimi,
             is_custom_provider=self.provider == "custom",
             ollama_num_ctx=self._ollama_num_ctx,
