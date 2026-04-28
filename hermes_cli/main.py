@@ -5315,7 +5315,7 @@ def _warn_stale_dashboard_processes() -> None:
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
-                for line in result.stdout.split("\n"):
+                for line in (getattr(result, "stdout", "") or "").split("\n"):
                     stripped = line.strip()
                     if not stripped or "grep" in stripped:
                         continue
@@ -5330,7 +5330,8 @@ def _warn_stale_dashboard_processes() -> None:
                     if (any(p in command for p in patterns)
                             and pid != self_pid):
                         dashboard_pids.append(pid)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except Exception as e:
+        logger.debug("Dashboard process scan during update failed: %s", e)
         return
 
     if not dashboard_pids:
@@ -7569,16 +7570,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # Warn about stale dashboard processes — the dashboard has no
         # service manager, so we can only tell the user to restart them.
         _warn_stale_dashboard_processes()
-
-        final_report = _collect_update_final_report(
-            git_cmd,
-            PROJECT_ROOT,
-            update_snapshot,
-            update_rescue_ref,
-            replay_result,
-            auto_stash_ref,
-            gateway_service_health,
-        )
 
         if switched_from_original_branch and current_branch != "HEAD":
             restore_branch_result = subprocess.run(
