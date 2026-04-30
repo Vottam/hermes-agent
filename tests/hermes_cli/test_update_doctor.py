@@ -46,6 +46,8 @@ def _sample_report(*, repair: dict | None = None, replay_result: str = "conflict
             "status_before": ["## main...fork/main"],
             "ahead": 111,
             "behind": 99,
+            "origin_ahead_count": 99,
+            "origin_behind_count": 111,
         },
         "replay": {
             "base": "origin/main",
@@ -59,6 +61,15 @@ def _sample_report(*, repair: dict | None = None, replay_result: str = "conflict
                     "bucket": "patch-id-duplicate",
                 }
             ],
+            "skipped_safe_commits": [
+                {
+                    "commit": "cafebabe",
+                    "subject": "fix(update): already covered",
+                    "patch_id": "patch-2",
+                    "bucket": "already-covered-in-fork-main",
+                }
+            ],
+            "replay_continued_after_skip": False,
             "rescue_ref": "refs/rescue/hermes-update-doctor-20260430-000000",
             "result": replay_result,
         },
@@ -160,6 +171,8 @@ def test_render_report_json_and_yaml_round_trip() -> None:
     assert json.loads(json_text) == report
     assert yaml.safe_load(yaml_text) == report
     assert json.loads(json_text)["replay"]["skipped_duplicate_commits"][0]["bucket"] == "patch-id-duplicate"
+    assert json.loads(json_text)["replay"]["skipped_safe_commits"][0]["bucket"] == "already-covered-in-fork-main"
+    assert json.loads(json_text)["environment"]["origin_ahead_count"] == 99
 
 
 def test_render_report_repair_round_trip() -> None:
@@ -245,20 +258,23 @@ def test_analyze_mode_still_works(monkeypatch, capsys) -> None:
 
 
 
-def test_run_mode_completed_skip_safe_and_preserves_working_tree(monkeypatch, capsys) -> None:
+def test_run_mode_needs_integration_after_skip_safe_and_preserves_working_tree(monkeypatch, capsys) -> None:
     report_before = _git_status()
-    monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: _sample_report())
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["replay"]["replay_continued_after_skip"] = True
+    monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: report)
 
     exit_code = doctor_main(["--run", "--format", "json"])
     out = capsys.readouterr().out
     report_after = _git_status()
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert report_before == report_after
 
     rendered = json.loads(out)
     assert rendered["mode"] == "run"
-    assert rendered["run_status"] == "completed"
+    assert rendered["run_status"] == "needs-integration"
+    assert rendered["result"] == "needs-integration"
     assert rendered["repair_status"] == "skip-safe"
     assert rendered["action_taken"] == "no-op"
     assert rendered["safety_level"] == "safe"
@@ -266,17 +282,24 @@ def test_run_mode_completed_skip_safe_and_preserves_working_tree(monkeypatch, ca
     assert rendered["pr_status"] == "no-pr-needed"
     assert rendered["merge_status"] == "not-needed"
     assert rendered["branch_name"] == "main"
-    assert rendered["next_step"] == "Commit is already covered in fork/main or main; no repair was applied."
+    assert rendered["next_step"] == "Sandbox replay continued after safe skips, but origin/main is still 99 commits ahead; no integration was applied."
     assert rendered["tests_run"] == []
     assert rendered["pr_url"] is None
     assert rendered["merge_commit"] is None
     assert rendered["final_validation"]["status"] == "not-needed"
+    assert rendered["origin_ahead_count"] == 99
+    assert rendered["skipped_safe_commits"]
+    assert rendered["replay_continued_after_skip"] is True
+    assert rendered["integration_status"] == "needs-integration"
+    assert rendered["material_changes_detected"] is False
 
 
 
 def test_run_mode_clean_when_no_conflict(monkeypatch, capsys) -> None:
     report = _sample_report(replay_result="passed", conflict=None)
     report["conflict"] = None
+    report["environment"]["behind"] = 0
+    report["environment"]["origin_ahead_count"] = 0
     monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: report)
 
     exit_code = doctor_main(["--run", "--format", "json"])
@@ -293,6 +316,7 @@ def test_run_mode_clean_when_no_conflict(monkeypatch, capsys) -> None:
     assert rendered["merge_status"] == "not-needed"
     assert rendered["risk_level"] == "low"
     assert rendered["final_validation"]["status"] == "not-needed"
+    assert rendered["origin_ahead_count"] == 0
 
 
 def test_auto_merge_requires_pr() -> None:
@@ -309,8 +333,9 @@ def test_pr_and_auto_merge_noop_path_does_not_create_pr(monkeypatch, capsys) -> 
     exit_code = doctor_main(["--run", "--pr", "--auto-merge-low-risk", "--format", "json"])
     out = capsys.readouterr().out
 
-    assert exit_code == 0
+    assert exit_code == 1
     rendered = json.loads(out)
+    assert rendered["run_status"] == "needs-integration"
     assert rendered["pr_status"] == "no-pr-needed"
     assert rendered["merge_status"] == "not-needed"
     assert rendered["pr_url"] is None
