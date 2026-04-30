@@ -1,10 +1,76 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import yaml
 
-from hermes_cli.update_doctor import ConflictBucket, classify_conflict, render_report
+from hermes_cli.update_doctor import ConflictBucket, classify_conflict, main as doctor_main, render_report
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _git_status() -> str:
+    return subprocess.run(
+        ["git", "status", "--short", "--branch"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def _sample_report(*, repair: dict | None = None) -> dict:
+    report = {
+        "schema_version": 1,
+        "tool": {"name": "hermes-update-doctor", "mode": "analyze"},
+        "timestamp": "2026-04-30T00:00:00Z",
+        "environment": {
+            "project_root": "/opt/hermes-agent",
+            "branch": "main",
+            "upstream": "fork/main",
+            "remotes": {
+                "fork": {"fetch": "git@github.com:Vottam/hermes-agent.git", "push": "git@github.com:Vottam/hermes-agent.git"},
+                "origin": {"fetch": "git@github.com:NousResearch/hermes-agent.git", "push": "git@github.com:NousResearch/hermes-agent.git"},
+            },
+            "status_before": ["## main...fork/main"],
+            "ahead": 111,
+            "behind": 99,
+        },
+        "replay": {
+            "base": "origin/main",
+            "candidate_count": 104,
+            "applied_count": 103,
+            "skipped_duplicate_commits": [
+                {
+                    "commit": "deadbeef",
+                    "subject": "fix(update): skip duplicate",
+                    "patch_id": "patch-1",
+                    "bucket": "patch-id-duplicate",
+                }
+            ],
+            "rescue_ref": "refs/rescue/hermes-update-doctor-20260430-000000",
+            "result": "conflict",
+        },
+        "conflict": {
+            "commit": "7c7fedae2a3a2bf92cdffc9c67026286af1baf46",
+            "subject": "fix(update): print final update safety report",
+            "patch_id": "c270a715455b204a1ca445a906bf1e1e7f1c9c70",
+            "bucket": "already-covered-in-fork-main",
+            "touched_files": ["hermes_cli/main.py"],
+            "conflicted_files": ["hermes_cli/main.py"],
+            "coverage_refs": ["refs/heads/main", "refs/remotes/fork/main"],
+            "main_contains": ["main"],
+            "remote_contains": ["fork/main"],
+            "worktree_status": ["UU hermes_cli/main.py"],
+        },
+        "verification": {"origin_untouched": True, "main_untouched": True},
+    }
+    if repair is not None:
+        report["repair"] = repair
+    return report
 
 
 def test_formal_buckets_are_stable_and_unique() -> None:
@@ -77,55 +143,63 @@ def test_classify_conflict_covers_basic_buckets() -> None:
 
 
 def test_render_report_json_and_yaml_round_trip() -> None:
-    report = {
-        "schema_version": 1,
-        "tool": {"name": "hermes-update-doctor", "mode": "analyze"},
-        "timestamp": "2026-04-30T00:00:00Z",
-        "environment": {
-            "project_root": "/opt/hermes-agent",
-            "branch": "main",
-            "upstream": "fork/main",
-            "remotes": {
-                "fork": {"fetch": "git@github.com:Vottam/hermes-agent.git", "push": "git@github.com:Vottam/hermes-agent.git"},
-                "origin": {"fetch": "git@github.com:NousResearch/hermes-agent.git", "push": "git@github.com:NousResearch/hermes-agent.git"},
-            },
-            "status_before": ["## main...fork/main"],
-            "ahead": 111,
-            "behind": 99,
-        },
-        "replay": {
-            "base": "origin/main",
-            "candidate_count": 104,
-            "applied_count": 103,
-            "skipped_duplicate_commits": [
-                {
-                    "commit": "deadbeef",
-                    "subject": "fix(update): skip duplicate",
-                    "patch_id": "patch-1",
-                    "bucket": "patch-id-duplicate",
-                }
-            ],
-            "rescue_ref": "refs/rescue/hermes-update-doctor-20260430-000000",
-            "result": "conflict",
-        },
-        "conflict": {
-            "commit": "7c7fedae2a3a2bf92cdffc9c67026286af1baf46",
-            "subject": "fix(update): print final update safety report",
-            "patch_id": "c270a715455b204a1ca445a906bf1e1e7f1c9c70",
-            "bucket": "already-covered-in-fork-main",
-            "touched_files": ["hermes_cli/main.py"],
-            "conflicted_files": ["hermes_cli/main.py"],
-            "coverage_refs": ["refs/heads/main", "refs/remotes/fork/main"],
-            "main_contains": ["main"],
-            "remote_contains": ["fork/main"],
-            "worktree_status": ["UU hermes_cli/main.py"],
-        },
-        "verification": {"origin_untouched": True, "main_untouched": True},
-    }
-
+    report = _sample_report()
     json_text = render_report(report, "json")
     yaml_text = render_report(report, "yaml")
 
     assert json.loads(json_text) == report
     assert yaml.safe_load(yaml_text) == report
     assert json.loads(json_text)["replay"]["skipped_duplicate_commits"][0]["bucket"] == "patch-id-duplicate"
+
+
+def test_render_report_repair_round_trip() -> None:
+    report = _sample_report(
+        repair={
+            "mode": "repair",
+            "result": "skip-safe",
+            "bucket": "already-covered-in-fork-main",
+            "repair_status": "skip-safe",
+            "repair_action": "no-op",
+            "safety_level": "safe",
+            "next_step": "Commit is already covered in fork/main or main; no repair was applied.",
+        }
+    )
+
+    json_text = render_report(report, "json")
+    yaml_text = render_report(report, "yaml")
+
+    assert json.loads(json_text) == report
+    assert yaml.safe_load(yaml_text) == report
+    assert json.loads(json_text)["repair"]["repair_status"] == "skip-safe"
+
+
+def test_repair_mode_skip_safe_and_preserves_working_tree(monkeypatch, capsys) -> None:
+    report_before = _git_status()
+    monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: _sample_report())
+
+    exit_code = doctor_main(["--repair", "--format", "json"])
+    out = capsys.readouterr().out
+    report_after = _git_status()
+
+    assert exit_code == 0
+    assert report_before == report_after
+
+    rendered = json.loads(out)
+    assert rendered["tool"]["mode"] == "repair"
+    assert rendered["repair"]["result"] == "skip-safe"
+    assert rendered["repair"]["repair_status"] == "skip-safe"
+    assert rendered["repair"]["repair_action"] == "no-op"
+    assert rendered["repair"]["safety_level"] == "safe"
+    assert rendered["repair"]["next_step"] == "Commit is already covered in fork/main or main; no repair was applied."
+
+
+def test_analyze_mode_still_works(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: _sample_report())
+
+    exit_code = doctor_main(["--analyze", "--format", "json"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    rendered = json.loads(out)
+    assert rendered["tool"]["mode"] == "analyze"
+    assert "repair" not in rendered

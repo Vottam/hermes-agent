@@ -297,11 +297,10 @@ The new work should sit on top of these primitives, not replace them in one shot
 - stop before any repair
 
 ### Phase 3 — Low-risk auto-repair
-- handle duplicate-by-patch-id
-- handle already-covered commits
-- handle clear test-desync cases
-- allow simple hunk repairs in non-sensitive files
-- rerun focused tests after every repair
+- handle duplicate-by-patch-id as skip-safe
+- handle already-covered commits as skip-safe
+- keep test-desync and simple hunk repair scaffolding sandbox-only for a later patch
+- rerun focused tests after any actual repair in sandbox
 
 ### Phase 4 — Branch/PR publication
 - create a repair branch on the fork

@@ -46,6 +46,13 @@ class ConflictBucket(str, Enum):
     MULTI_FILE_OR_RUNTIME_CONFLICT = "multi-file-or-runtime-conflict"
 
 
+SAFE_SKIP_BUCKETS = {
+    ConflictBucket.PATCH_ID_DUPLICATE.value,
+    ConflictBucket.ALREADY_COVERED_IN_FORK_MAIN.value,
+    ConflictBucket.OBSOLETE.value,
+}
+
+
 @dataclass(slots=True)
 class GitCommandError(RuntimeError):
     cmd: tuple[str, ...]
@@ -249,6 +256,71 @@ def classify_conflict(
     return ConflictBucket.MULTI_FILE_OR_RUNTIME_CONFLICT
 
 
+def _repair_summary(report: dict[str, Any]) -> dict[str, Any]:
+    conflict = report.get("conflict") or {}
+    bucket = conflict.get("bucket")
+    if not bucket:
+        return {
+            "mode": "repair",
+            "result": report["replay"]["result"],
+            "bucket": None,
+            "repair_status": "not-needed",
+            "repair_action": "no-op",
+            "safety_level": "safe",
+            "next_step": "Replay completed cleanly; no repair was needed.",
+        }
+
+    if bucket in SAFE_SKIP_BUCKETS:
+        if bucket == ConflictBucket.ALREADY_COVERED_IN_FORK_MAIN.value:
+            next_step = "Commit is already covered in fork/main or main; no repair was applied."
+        elif bucket == ConflictBucket.PATCH_ID_DUPLICATE.value:
+            next_step = "Equivalent patch-id already exists in the replay queue or base; no repair was applied."
+        else:
+            next_step = "Commit is obsolete for the current branch state; no repair was applied."
+        return {
+            "mode": "repair",
+            "result": "skip-safe",
+            "bucket": bucket,
+            "repair_status": "skip-safe",
+            "repair_action": "no-op",
+            "safety_level": "safe",
+            "next_step": next_step,
+        }
+
+    if bucket in {
+        ConflictBucket.TEST_DESYNC.value,
+        ConflictBucket.SINGLE_FILE_HUNK_CONFLICT.value,
+    }:
+        return {
+            "mode": "repair",
+            "result": "blocked",
+            "bucket": bucket,
+            "repair_status": "blocked",
+            "repair_action": "no-op",
+            "safety_level": "guarded",
+            "next_step": "Sandbox patching for test-only or simple-hunk conflicts is not enabled yet in this phase.",
+        }
+
+    return {
+        "mode": "repair",
+        "result": "blocked",
+        "bucket": bucket,
+        "repair_status": "blocked",
+        "repair_action": "no-op",
+        "safety_level": "guarded",
+        "next_step": "This conflict bucket is outside the safe-repair scope for phase 3.",
+    }
+
+
+def _with_mode(report: dict[str, Any], mode: str, *, repair: dict[str, Any] | None = None) -> dict[str, Any]:
+    derived = dict(report)
+    derived["tool"] = dict(report["tool"])
+    derived["tool"]["mode"] = mode
+    if repair is not None:
+        derived["repair"] = repair
+    return derived
+
+
 def _format_list(title: str, items: Sequence[str], *, indent: str = "  ") -> list[str]:
     lines = [f"{indent}{title}:"]
     if not items:
@@ -307,6 +379,17 @@ def _build_text_report(report: dict[str, Any]) -> str:
     lines.append(f"  result: {replay['result']}")
     lines.append(f"  origin untouched: {str(report['verification']['origin_untouched']).lower()}")
     lines.append(f"  main untouched: {str(report['verification']['main_untouched']).lower()}")
+    repair = report.get("repair")
+    if repair:
+        lines.append("")
+        lines.append("Repair")
+        lines.append(f"  mode: {repair['mode']}")
+        lines.append(f"  result: {repair['result']}")
+        lines.append(f"  bucket: {repair['bucket'] or '<none>'}")
+        lines.append(f"  repair status: {repair['repair_status']}")
+        lines.append(f"  repair action: {repair['repair_action']}")
+        lines.append(f"  safety level: {repair['safety_level']}")
+        lines.append(f"  next step: {repair['next_step']}")
     return "\n".join(lines)
 
 
@@ -482,7 +565,9 @@ def render_report(report: dict[str, Any], output_format: str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=TOOL_NAME, description="Diagnosis-first Hermes update replay doctor")
-    parser.add_argument("--analyze", action="store_true", help="Run the diagnosis-only replay analysis")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--analyze", action="store_true", help="Run the diagnosis-only replay analysis")
+    mode.add_argument("--repair", action="store_true", help="Run the diagnosis-only safe-repair decision flow")
     parser.add_argument(
         "--format",
         choices=("text", "json", "yaml"),
@@ -496,13 +581,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    if not args.analyze:
-        parser.print_help(sys.stderr)
-        return 2
-
     report = build_report(replay_base=args.replay_base)
+    exit_code = 0 if report["replay"]["result"] == "passed" else 1
+
+    if args.repair:
+        repair = _repair_summary(report)
+        report = _with_mode(report, "repair", repair=repair)
+        exit_code = 0 if repair["repair_status"] in {"skip-safe", "not-needed"} else 1
+
     sys.stdout.write(render_report(report, args.format))
-    return 0 if report["replay"]["result"] == "passed" else 1
+    return exit_code
+
 
 
 if __name__ == "__main__":  # pragma: no cover
