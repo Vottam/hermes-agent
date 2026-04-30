@@ -26,7 +26,7 @@ It must never silently touch `origin`, never force-push, and never mutate the ac
 
 ## 2) Desired User Flow
 
-Target flow for a future `hermes-update-doctor` command or `hermes-safe-update --auto-repair` mode:
+Target flow for the normal `hermes-update-doctor --run` command (with `--analyze` and `--repair` kept as technical/debug modes):
 
 1. Preflight checks
    - confirm current branch and remotes
@@ -262,6 +262,8 @@ The doctor’s final report should include:
 - tests executed and results
 - branch/PR created, if any
 - explicit stop reason if the flow halted
+- `--run` is the human-facing command; `--analyze` and `--repair` remain technical/debug modes
+- dry-run/replay is internal to `--run`, not a separate manual step
 - confirmation that `origin` was not touched
 
 ---
@@ -275,6 +277,7 @@ Reuse the current building blocks instead of rewriting them:
 - `hermes_cli/main.py` update/replay functions
 - current update-focused pytest coverage
 - git worktree/replay simulation already used by the dry-run wrapper
+- `--run` should consume that internal dry-run and decide the safe path automatically
 
 The new work should sit on top of these primitives, not replace them in one shot.
 
@@ -320,7 +323,7 @@ The first code patch should be intentionally small:
 
 1. Add a new orchestration command or mode that wraps the existing safe-update flow.
 2. Keep `hermes-safe-update` behavior intact by default.
-3. Introduce a diagnosis-only `--auto-repair` or `hermes update-doctor` path that:
+3. Introduce a diagnosis-only `--run` or `hermes update-doctor` path that:
    - creates a rescue ref,
    - creates a temp worktree,
    - simulates replay,
@@ -332,7 +335,7 @@ The first code patch should be intentionally small:
    - already covered in fork/main
    - conflict in one hunk
    - stale test expectation
-5. Add tests for the classifier and the dry-run report.
+5. Add tests for the classifier, run mode, and the dry-run report.
 
 This gives us a safe foundation before any repair automation is allowed.
 

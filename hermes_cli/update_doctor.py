@@ -312,6 +312,52 @@ def _repair_summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
+    replay = report["replay"]
+    conflict = report.get("conflict") or {}
+    if replay["result"] == "passed":
+        return {
+            "mode": "run",
+            "result": "clean",
+            "bucket": None,
+            "run_status": "clean",
+            "repair_status": "not-needed",
+            "action_taken": "no-op",
+            "safety_level": "safe",
+            "next_step": "Replay completed cleanly; no repair was needed.",
+            "tests_run": [],
+            "pr_url": None,
+        }
+
+    repair = _repair_summary(report)
+    if repair["repair_status"] in {"skip-safe", "not-needed"}:
+        return {
+            "mode": "run",
+            "result": repair["result"],
+            "bucket": repair["bucket"],
+            "run_status": "completed",
+            "repair_status": repair["repair_status"],
+            "action_taken": repair["repair_action"],
+            "safety_level": repair["safety_level"],
+            "next_step": repair["next_step"],
+            "tests_run": [],
+            "pr_url": None,
+        }
+
+    return {
+        "mode": "run",
+        "result": repair["result"],
+        "bucket": conflict.get("bucket"),
+        "run_status": "blocked",
+        "repair_status": repair["repair_status"],
+        "action_taken": repair["repair_action"],
+        "safety_level": repair["safety_level"],
+        "next_step": repair["next_step"],
+        "tests_run": [],
+        "pr_url": None,
+    }
+
+
 def _with_mode(report: dict[str, Any], mode: str, *, repair: dict[str, Any] | None = None) -> dict[str, Any]:
     derived = dict(report)
     derived["tool"] = dict(report["tool"])
@@ -379,6 +425,19 @@ def _build_text_report(report: dict[str, Any]) -> str:
     lines.append(f"  result: {replay['result']}")
     lines.append(f"  origin untouched: {str(report['verification']['origin_untouched']).lower()}")
     lines.append(f"  main untouched: {str(report['verification']['main_untouched']).lower()}")
+    if "run_status" in report:
+        lines.append("")
+        lines.append("Run")
+        lines.append(f"  mode: {report['mode']}")
+        lines.append(f"  result: {report['result']}")
+        lines.append(f"  bucket: {report['bucket'] or '<none>'}")
+        lines.append(f"  run status: {report['run_status']}")
+        lines.append(f"  repair status: {report['repair_status']}")
+        lines.append(f"  action taken: {report['action_taken']}")
+        lines.append(f"  safety level: {report['safety_level']}")
+        lines.append(f"  next step: {report['next_step']}")
+        lines.append(f"  tests run: {', '.join(report['tests_run']) if report['tests_run'] else '<none>'}")
+        lines.append(f"  pr url: {report['pr_url'] or '<none>'}")
     repair = report.get("repair")
     if repair:
         lines.append("")
@@ -567,6 +626,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=TOOL_NAME, description="Diagnosis-first Hermes update replay doctor")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--analyze", action="store_true", help="Run the diagnosis-only replay analysis")
+    mode.add_argument("--run", action="store_true", help="Run the one-command update doctor orchestration flow")
     mode.add_argument("--repair", action="store_true", help="Run the diagnosis-only safe-repair decision flow")
     parser.add_argument(
         "--format",
@@ -584,7 +644,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = build_report(replay_base=args.replay_base)
     exit_code = 0 if report["replay"]["result"] == "passed" else 1
 
-    if args.repair:
+    if args.run:
+        run = _run_summary(report)
+        report = _with_mode(report, "run")
+        report.update(run)
+        exit_code = 0 if run["run_status"] in {"clean", "completed"} else 1
+    elif args.repair:
         repair = _repair_summary(report)
         report = _with_mode(report, "repair", repair=repair)
         exit_code = 0 if repair["repair_status"] in {"skip-safe", "not-needed"} else 1
