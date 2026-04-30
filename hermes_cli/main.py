@@ -5687,16 +5687,25 @@ def replay_missing_update_commits(
         cherry_status[line[1:].strip()] = line[0]
 
     skipped_commits: list[str] = []
-    replay_candidates: list[str] = []
+    replay_candidates: list[tuple[str, str | None]] = []
+    seen_patch_ids: set[str] = set()
     for commit in update_snapshot.ahead_commits:
+        patch_id = _update_commit_patch_id(git_cmd, cwd, commit)
+        if patch_id and patch_id in seen_patch_ids:
+            skipped_commits.append(commit)
+            continue
         status = cherry_status.get(commit)
         if status == "-":
             skipped_commits.append(commit)
+            if patch_id:
+                seen_patch_ids.add(patch_id)
         elif status == "+":
-            replay_candidates.append(commit)
+            replay_candidates.append((commit, patch_id))
+            if patch_id:
+                seen_patch_ids.add(patch_id)
 
     replayed_commits: list[str] = []
-    for commit in replay_candidates:
+    for commit, patch_id in replay_candidates:
         pick_result = subprocess.run(
             git_cmd + ["cherry-pick", commit],
             cwd=cwd,
@@ -5718,6 +5727,8 @@ def replay_missing_update_commits(
                 succeeded=False,
             )
         replayed_commits.append(commit)
+        if patch_id:
+            seen_patch_ids.add(patch_id)
 
     return UpdateReplayResult(
         skipped_commits=skipped_commits,
@@ -5725,6 +5736,33 @@ def replay_missing_update_commits(
         conflicted_commit=None,
         succeeded=True,
     )
+
+
+def _update_commit_patch_id(
+    git_cmd: list[str],
+    cwd: Path,
+    commit: str,
+) -> str | None:
+    try:
+        show_result = subprocess.run(
+            git_cmd + ["show", "--no-ext-diff", "--no-color", commit],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        patch_id_result = subprocess.run(
+            git_cmd + ["patch-id", "--stable"],
+            cwd=cwd,
+            input=show_result.stdout,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        patch_id = (patch_id_result.stdout or "").split()
+        return patch_id[0] if patch_id else None
+    except Exception:
+        return None
 
 
 def _format_update_commit_list(commits: list[str]) -> str:
