@@ -263,6 +263,8 @@ The doctor’s final report should include:
 - branch/PR created, if any
 - explicit stop reason if the flow halted
 - `--run` is the human-facing command; `--analyze` and `--repair` remain technical/debug modes
+- `--pr` adds publication to the fork when a validated material change exists
+- `--auto-merge-low-risk` only merges low-risk PRs after clean GitHub metadata checks
 - dry-run/replay is internal to `--run`, not a separate manual step
 - confirmation that `origin` was not touched
 
@@ -306,14 +308,18 @@ The new work should sit on top of these primitives, not replace them in one shot
 - rerun focused tests after any actual repair in sandbox
 
 ### Phase 4 — Branch/PR publication
-- create a repair branch on the fork
-- open a PR with the report
-- keep merge manual by default
+- create a fork branch only when a validated material change exists
+- open a PR against fork/main
+- keep `origin` untouched
+- allow `--pr` to stay a no-op when the run produced no material change
 
-### Phase 5 — Optional auto-merge gate
-- only under explicit opt-in
-- only for low-risk repairs
-- only when all checks pass
+### Phase 5 — Optional low-risk auto-merge gate
+- only under explicit opt-in via `--auto-merge-low-risk`
+- only when `--pr` is enabled
+- only for low-risk scopes: docs-only, tests-only, metadata/report-only, skip-safe/no-op, patch-id duplicate, already-covered-in-fork-main
+- require GitHub metadata to be `MERGEABLE` and `CLEAN`
+- merge normally, never squash
+- refresh local main after merge and run final validation
 
 ---
 

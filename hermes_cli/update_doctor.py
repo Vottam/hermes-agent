@@ -315,6 +315,7 @@ def _repair_summary(report: dict[str, Any]) -> dict[str, Any]:
 def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
     replay = report["replay"]
     conflict = report.get("conflict") or {}
+    branch_name = report["environment"]["branch"]
     if replay["result"] == "passed":
         return {
             "mode": "run",
@@ -324,12 +325,19 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
             "repair_status": "not-needed",
             "action_taken": "no-op",
             "safety_level": "safe",
-            "next_step": "Replay completed cleanly; no repair was needed.",
-            "tests_run": [],
+            "risk_level": "low",
+            "pr_status": "no-pr-needed",
             "pr_url": None,
+            "merge_status": "not-needed",
+            "merge_commit": None,
+            "branch_name": branch_name,
+            "tests_run": [],
+            "final_validation": {"status": "not-needed", "checks": []},
+            "next_step": "Replay completed cleanly; no repair was needed.",
         }
 
     repair = _repair_summary(report)
+    risk_level = _classify_pr_risk(report)
     if repair["repair_status"] in {"skip-safe", "not-needed"}:
         return {
             "mode": "run",
@@ -339,9 +347,15 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
             "repair_status": repair["repair_status"],
             "action_taken": repair["repair_action"],
             "safety_level": repair["safety_level"],
-            "next_step": repair["next_step"],
-            "tests_run": [],
+            "risk_level": risk_level,
+            "pr_status": "no-pr-needed",
             "pr_url": None,
+            "merge_status": "not-needed",
+            "merge_commit": None,
+            "branch_name": branch_name,
+            "tests_run": [],
+            "final_validation": {"status": "not-needed", "checks": []},
+            "next_step": repair["next_step"],
         }
 
     return {
@@ -352,10 +366,224 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
         "repair_status": repair["repair_status"],
         "action_taken": repair["repair_action"],
         "safety_level": repair["safety_level"],
-        "next_step": repair["next_step"],
-        "tests_run": [],
+        "risk_level": risk_level,
+        "pr_status": "not-requested",
         "pr_url": None,
+        "merge_status": "not-needed",
+        "merge_commit": None,
+        "branch_name": branch_name,
+        "tests_run": [],
+        "final_validation": {"status": "not-needed", "checks": []},
+        "next_step": repair["next_step"],
     }
+
+
+def _publication_files(report: dict[str, Any]) -> list[str]:
+    repair = report.get("repair") or {}
+    files = repair.get("changed_files") or repair.get("applied_files") or []
+    return [str(path) for path in files if path]
+
+
+def _is_low_risk_path(path: str) -> bool:
+    lowered = path.lower()
+    return (
+        path in {"hermes_cli/update_doctor.py", "docs/plans/2026-04-30-hermes-update-doctor.md", "tests/hermes_cli/test_update_doctor.py"}
+        or lowered.startswith("docs/")
+        or lowered.startswith("tests/")
+        or lowered.endswith(".md")
+        or lowered.endswith("README")
+    )
+
+
+def _is_high_risk_path(path: str) -> bool:
+    lowered = path.lower()
+    lockfiles = (
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "package-lock",
+        "npm-shrinkwrap.json",
+    )
+    if lowered in {"hermes_cli/main.py"}:
+        return True
+    if any(token in lowered for token in ("auth", "credential", "secret", "token", "password", "redaction", "persistence", "state.db", "wal")):
+        return True
+    if any(token in lowered for token in ("gateway/", "gateway\\", "providers/", "provider/", "security/")):
+        return True
+    if any(lowered.endswith(lockfile) for lockfile in lockfiles):
+        return True
+    return False
+
+
+def _has_material_change(report: dict[str, Any]) -> bool:
+    repair = report.get("repair") or {}
+    return repair.get("repair_status") == "applied" or bool(repair.get("changed_files") or repair.get("applied_files"))
+
+
+def _classify_pr_risk(report: dict[str, Any]) -> str:
+    if not _has_material_change(report):
+        return "low"
+    files = _publication_files(report)
+    if not files:
+        return "medium"
+    if any(_is_high_risk_path(path) for path in files):
+        return "high"
+    if all(_is_low_risk_path(path) for path in files):
+        return "low"
+    if len([path for path in files if _is_high_risk_path(path)]) > 5:
+        return "high"
+    return "medium"
+
+
+def _ensure_fork_safe_publication(root: Path) -> None:
+    fork_push = _remote_url(root, "fork", push=True)
+    origin_push = _remote_url(root, "origin", push=True)
+    if not fork_push:
+        raise SystemExit("✗ missing fork push URL")
+    if not origin_push:
+        raise SystemExit("✗ missing origin push URL")
+
+
+def _validation_checks(root: Path) -> list[str]:
+    checks = [
+        "./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q",
+        "hermes doctor",
+        "hermes --version",
+    ]
+    for command in checks:
+        if command.startswith("./venv/bin/python"):
+            result = subprocess.run(command.split(), cwd=str(root), capture_output=True, text=True)
+        else:
+            result = subprocess.run(command.split(), cwd=str(root), capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(f"✗ validation failed: {command}")
+    return checks
+
+
+def _report_publication_state(report: dict[str, Any]) -> dict[str, Any]:
+    derived = dict(report)
+    derived.setdefault("branch_name", report["environment"]["branch"])
+    derived.setdefault("risk_level", _classify_pr_risk(report))
+    if not _has_material_change(report):
+        derived["pr_status"] = "no-pr-needed"
+        derived["merge_status"] = "not-needed"
+        derived.setdefault("pr_url", None)
+        derived.setdefault("merge_commit", None)
+        derived.setdefault("final_validation", {"status": "not-needed", "checks": []})
+        return derived
+    derived.setdefault("pr_status", "not-requested")
+    derived.setdefault("merge_status", "not-needed")
+    derived.setdefault("pr_url", None)
+    derived.setdefault("merge_commit", None)
+    derived.setdefault("final_validation", {"status": "not-run", "checks": []})
+    return derived
+
+
+def _create_pr(root: Path, *, branch_name: str, title: str, body: str) -> tuple[str, int | None]:
+    result = subprocess.run(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            "Vottam/hermes-agent",
+            "--base",
+            "main",
+            "--head",
+            branch_name,
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    output = (result.stdout or result.stderr).strip()
+    pr_url = next((token for token in output.split() if token.startswith("https://github.com/")), output or None)
+    pr_view = subprocess.run(
+        ["gh", "pr", "view", branch_name, "--repo", "Vottam/hermes-agent", "--json", "url,number,mergeable,mergeStateStatus,autoMergeRequest,baseRefName,headRefName"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    pr_data = json.loads(pr_view.stdout)
+    return pr_data["url"] or pr_url, pr_data.get("number")
+
+
+def _merge_pr(root: Path, *, pr_url: str) -> str | None:
+    result = subprocess.run(
+        ["gh", "pr", "merge", pr_url, "--merge", "--subject", "Merge Hermes Update Doctor PR", "--body", "Auto-merged low-risk Update Doctor PR."],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    merge_output = (result.stdout or result.stderr).strip()
+    return merge_output or None
+
+
+def _review_pr_for_auto_merge(root: Path, pr_url: str) -> dict[str, Any]:
+    pr_view = subprocess.run(
+        ["gh", "pr", "view", pr_url, "--repo", "Vottam/hermes-agent", "--json", "mergeable,mergeStateStatus,autoMergeRequest,baseRefName,headRefName,url"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(pr_view.stdout)
+
+
+def _refresh_main_and_validate(root: Path) -> list[str]:
+    subprocess.run(["git", "fetch", "fork"], cwd=str(root), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "switch", "main"], cwd=str(root), check=True, capture_output=True, text=True)
+    subprocess.run(["git", "pull", "--ff-only", "fork", "main"], cwd=str(root), check=True, capture_output=True, text=True)
+    checks = _validation_checks(root)
+    subprocess.run(["git", "status", "--short", "--branch"], cwd=str(root), check=True, capture_output=True, text=True)
+    return checks
+
+
+def _publish_run_artifacts(report: dict[str, Any], *, root: Path, request_pr: bool, request_auto_merge_low_risk: bool) -> dict[str, Any]:
+    published = _report_publication_state(report)
+    if not request_pr or not _has_material_change(report):
+        return published
+
+    _ensure_fork_safe_publication(root)
+    risk_level = published["risk_level"]
+    branch_name = f"update-doctor-pr-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    published["branch_name"] = branch_name
+    published["action_taken"] = "pr-created"
+    published["pr_status"] = "created"
+    published["merge_status"] = "not-requested"
+
+    pr_url, _ = _create_pr(root, branch_name=branch_name, title="Add one-command PR and low-risk merge flow to Update Doctor", body="Update Doctor publication flow.")
+    published["pr_url"] = pr_url
+
+    if not request_auto_merge_low_risk:
+        return published
+
+    if risk_level != "low":
+        published["merge_status"] = "not-eligible"
+        published["next_step"] = "PR created, but auto-merge is blocked because risk is not low."
+        return published
+
+    pr_data = _review_pr_for_auto_merge(root, pr_url)
+    if pr_data.get("mergeable") != "MERGEABLE" or pr_data.get("mergeStateStatus") != "CLEAN" or pr_data.get("baseRefName") != "main" or pr_data.get("autoMergeRequest") not in (None, {}):
+        published["merge_status"] = "blocked"
+        published["next_step"] = "PR is not mergeable/clean enough for auto-merge."
+        return published
+
+    merge_output = _merge_pr(root, pr_url=pr_url)
+    published["merge_status"] = "merged"
+    published["merge_commit"] = merge_output
+    published["action_taken"] = "pr-created-and-merged"
+    published["final_validation"] = {"status": "passed", "checks": _refresh_main_and_validate(root)}
+    published["tests_run"] = ["./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q"]
+    published["next_step"] = "Merged low-risk PR and refreshed main locally."
+    return published
 
 
 def _with_mode(report: dict[str, Any], mode: str, *, repair: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -435,9 +663,18 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  repair status: {report['repair_status']}")
         lines.append(f"  action taken: {report['action_taken']}")
         lines.append(f"  safety level: {report['safety_level']}")
+        lines.append(f"  risk level: {report['risk_level']}")
+        lines.append(f"  pr status: {report['pr_status']}")
+        lines.append(f"  pr url: {report['pr_url'] or '<none>'}")
+        lines.append(f"  merge status: {report['merge_status']}")
+        lines.append(f"  merge commit: {report['merge_commit'] or '<none>'}")
+        lines.append(f"  branch name: {report['branch_name']}")
         lines.append(f"  next step: {report['next_step']}")
         lines.append(f"  tests run: {', '.join(report['tests_run']) if report['tests_run'] else '<none>'}")
-        lines.append(f"  pr url: {report['pr_url'] or '<none>'}")
+        final_validation = report.get('final_validation') or {'status': 'not-needed', 'checks': []}
+        lines.append(f"  final validation: {final_validation['status']}")
+        if final_validation.get('checks'):
+            lines.append(f"    checks: {', '.join(final_validation['checks'])}")
     repair = report.get("repair")
     if repair:
         lines.append("")
@@ -628,6 +865,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument("--analyze", action="store_true", help="Run the diagnosis-only replay analysis")
     mode.add_argument("--run", action="store_true", help="Run the one-command update doctor orchestration flow")
     mode.add_argument("--repair", action="store_true", help="Run the diagnosis-only safe-repair decision flow")
+    parser.add_argument("--pr", action="store_true", help="Create a fork PR when a validated material change exists")
+    parser.add_argument(
+        "--auto-merge-low-risk",
+        action="store_true",
+        help="Automatically merge low-risk PRs after review metadata checks",
+    )
     parser.add_argument(
         "--format",
         choices=("text", "json", "yaml"),
@@ -640,6 +883,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Replay base ref to analyze (default: origin/main)",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.auto_merge_low_risk and not args.pr:
+        parser.error("--auto-merge-low-risk requires --pr")
+    if args.pr and not args.run:
+        parser.error("--pr is only supported with --run")
+    if args.auto_merge_low_risk and not args.run:
+        parser.error("--auto-merge-low-risk is only supported with --run")
 
     report = build_report(replay_base=args.replay_base)
     exit_code = 0 if report["replay"]["result"] == "passed" else 1
@@ -649,6 +898,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = _with_mode(report, "run")
         report.update(run)
         exit_code = 0 if run["run_status"] in {"clean", "completed"} else 1
+        if args.pr:
+            root = _require_repo_root()
+            published = _publish_run_artifacts(
+                report,
+                root=root,
+                request_pr=True,
+                request_auto_merge_low_risk=args.auto_merge_low_risk,
+            )
+            report.update(published)
     elif args.repair:
         repair = _repair_summary(report)
         report = _with_mode(report, "repair", repair=repair)
