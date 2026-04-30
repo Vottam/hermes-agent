@@ -124,9 +124,10 @@ class TestCmdUpdateBranchFallback:
             if call.args and call.args[0][0] == "/usr/bin/npm"
         ]
 
-        # cmd_update runs npm commands in two locations:
+        # cmd_update runs npm commands in three locations:
         #   1. repo root  — slash-command / TUI bridge deps
         #   2. ui-tui/    — Ink TUI deps
+        #   3. web/       — web UI frontend deps + build
         full_flags = [
             "/usr/bin/npm",
             "ci",
@@ -138,6 +139,8 @@ class TestCmdUpdateBranchFallback:
         assert npm_calls == [
             (full_flags, PROJECT_ROOT),
             (full_flags, PROJECT_ROOT / "ui-tui"),
+            (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
+            (["/usr/bin/npm", "run", "build"], PROJECT_ROOT / "web"),
         ]
 
     def test_update_non_interactive_skips_migration_prompt(self, mock_args, capsys):
