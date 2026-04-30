@@ -4,9 +4,17 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
-from hermes_cli.update_doctor import ConflictBucket, classify_conflict, main as doctor_main, render_report
+from hermes_cli.update_doctor import (
+    ConflictBucket,
+    classify_conflict,
+    main as doctor_main,
+    render_report,
+    _classify_pr_risk,
+    _publish_run_artifacts,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -254,9 +262,15 @@ def test_run_mode_completed_skip_safe_and_preserves_working_tree(monkeypatch, ca
     assert rendered["repair_status"] == "skip-safe"
     assert rendered["action_taken"] == "no-op"
     assert rendered["safety_level"] == "safe"
+    assert rendered["risk_level"] == "low"
+    assert rendered["pr_status"] == "no-pr-needed"
+    assert rendered["merge_status"] == "not-needed"
+    assert rendered["branch_name"] == "main"
     assert rendered["next_step"] == "Commit is already covered in fork/main or main; no repair was applied."
     assert rendered["tests_run"] == []
     assert rendered["pr_url"] is None
+    assert rendered["merge_commit"] is None
+    assert rendered["final_validation"]["status"] == "not-needed"
 
 
 
@@ -275,3 +289,128 @@ def test_run_mode_clean_when_no_conflict(monkeypatch, capsys) -> None:
     assert rendered["result"] == "clean"
     assert rendered["bucket"] is None
     assert rendered["repair_status"] == "not-needed"
+    assert rendered["pr_status"] == "no-pr-needed"
+    assert rendered["merge_status"] == "not-needed"
+    assert rendered["risk_level"] == "low"
+    assert rendered["final_validation"]["status"] == "not-needed"
+
+
+def test_auto_merge_requires_pr() -> None:
+    with pytest.raises(SystemExit):
+        doctor_main(["--run", "--auto-merge-low-risk", "--format", "json"])
+
+
+def test_pr_and_auto_merge_noop_path_does_not_create_pr(monkeypatch, capsys) -> None:
+    report = _sample_report()
+    monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: report)
+    monkeypatch.setattr("hermes_cli.update_doctor._create_pr", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("PR should not be created")))
+    monkeypatch.setattr("hermes_cli.update_doctor._merge_pr", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("merge should not run")))
+
+    exit_code = doctor_main(["--run", "--pr", "--auto-merge-low-risk", "--format", "json"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    rendered = json.loads(out)
+    assert rendered["pr_status"] == "no-pr-needed"
+    assert rendered["merge_status"] == "not-needed"
+    assert rendered["pr_url"] is None
+
+
+def test_classify_pr_risk_handles_low_and_high_paths() -> None:
+    docs_report = _sample_report()
+    docs_report["repair"] = {
+        "mode": "repair",
+        "result": "changed",
+        "bucket": "test-desync",
+        "repair_status": "applied",
+        "repair_action": "patch-applied",
+        "safety_level": "safe",
+        "next_step": "done",
+        "changed_files": ["docs/notes.md", "docs/plans/2026-04-30-hermes-update-doctor.md"],
+    }
+    tests_report = _sample_report()
+    tests_report["repair"] = {
+        "mode": "repair",
+        "result": "changed",
+        "bucket": "test-desync",
+        "repair_status": "applied",
+        "repair_action": "patch-applied",
+        "safety_level": "safe",
+        "next_step": "done",
+        "changed_files": ["tests/hermes_cli/test_update_doctor.py"],
+    }
+    runtime_report = _sample_report()
+    runtime_report["repair"] = {
+        "mode": "repair",
+        "result": "changed",
+        "bucket": "runtime-sensitive",
+        "repair_status": "applied",
+        "repair_action": "patch-applied",
+        "safety_level": "guarded",
+        "next_step": "done",
+        "changed_files": ["hermes_cli/main.py"],
+    }
+
+    assert _classify_pr_risk(docs_report) == "low"
+    assert _classify_pr_risk(tests_report) == "low"
+    assert _classify_pr_risk(runtime_report) == "high"
+
+
+def test_publish_artifacts_merges_low_risk_pr(monkeypatch) -> None:
+    report = _sample_report()
+    report["repair"] = {
+        "mode": "repair",
+        "result": "changed",
+        "bucket": "test-desync",
+        "repair_status": "applied",
+        "repair_action": "patch-applied",
+        "safety_level": "safe",
+        "next_step": "done",
+        "changed_files": ["docs/notes.md"],
+    }
+    monkeypatch.setattr("hermes_cli.update_doctor._ensure_fork_safe_publication", lambda *args, **kwargs: None)
+    monkeypatch.setattr("hermes_cli.update_doctor._create_pr", lambda *args, **kwargs: ("https://github.com/Vottam/hermes-agent/pull/99", 99))
+    monkeypatch.setattr("hermes_cli.update_doctor._review_pr_for_auto_merge", lambda *args, **kwargs: {"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "autoMergeRequest": None, "baseRefName": "main", "headRefName": "update-doctor-pr-1", "url": "https://github.com/Vottam/hermes-agent/pull/99"})
+    monkeypatch.setattr("hermes_cli.update_doctor._merge_pr", lambda *args, **kwargs: "merge-commit-sha")
+    monkeypatch.setattr("hermes_cli.update_doctor._refresh_main_and_validate", lambda *args, **kwargs: ["./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q", "hermes doctor", "hermes --version"])
+
+    published = _publish_run_artifacts(report, root=REPO_ROOT, request_pr=True, request_auto_merge_low_risk=True)
+
+    assert published["pr_status"] == "created"
+    assert published["merge_status"] == "merged"
+    assert published["merge_commit"] == "merge-commit-sha"
+    assert published["pr_url"] == "https://github.com/Vottam/hermes-agent/pull/99"
+    assert published["final_validation"]["status"] == "passed"
+    assert published["final_validation"]["checks"]
+    assert published["action_taken"] == "pr-created-and-merged"
+
+
+def test_render_report_contains_pr_and_merge_fields() -> None:
+    report = _sample_report()
+    report.update(
+        {
+            "mode": "run",
+            "result": "skip-safe",
+            "bucket": "already-covered-in-fork-main",
+            "run_status": "completed",
+            "repair_status": "skip-safe",
+            "action_taken": "no-op",
+            "safety_level": "safe",
+            "risk_level": "low",
+            "pr_status": "no-pr-needed",
+            "pr_url": None,
+            "merge_status": "not-needed",
+            "merge_commit": None,
+            "branch_name": "main",
+            "tests_run": [],
+            "final_validation": {"status": "not-needed", "checks": []},
+            "next_step": "Commit is already covered in fork/main or main; no repair was applied.",
+        }
+    )
+
+    json_text = render_report(report, "json")
+    rendered = json.loads(json_text)
+
+    assert rendered["pr_status"] == "no-pr-needed"
+    assert rendered["merge_status"] == "not-needed"
+    assert rendered["final_validation"]["status"] == "not-needed"
