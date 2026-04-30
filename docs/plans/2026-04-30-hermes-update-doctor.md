@@ -262,6 +262,11 @@ The doctor’s final report should include:
 - tests executed and results
 - branch/PR created, if any
 - explicit stop reason if the flow halted
+- `origin_ahead_count`
+- `skipped_safe_commits`
+- `replay_continued_after_skip`
+- `integration_status`
+- `material_changes_detected`
 - `--run` is the human-facing command; `--analyze` and `--repair` remain technical/debug modes
 - `--pr` adds publication to the fork when a validated material change exists
 - `--auto-merge-low-risk` only merges low-risk PRs after clean GitHub metadata checks
@@ -304,6 +309,8 @@ The new work should sit on top of these primitives, not replace them in one shot
 ### Phase 3 — Low-risk auto-repair
 - handle duplicate-by-patch-id as skip-safe
 - handle already-covered commits as skip-safe
+- when a safe skip occurs in the sandbox, abort the cherry-pick, record it in `skipped_safe_commits`, and continue replaying later commits
+- if safe skips happen while `origin/main` is still ahead, report `integration_status=needs-integration` instead of `completed`
 - keep test-desync and simple hunk repair scaffolding sandbox-only for a later patch
 - rerun focused tests after any actual repair in sandbox
 

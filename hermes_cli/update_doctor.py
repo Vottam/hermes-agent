@@ -316,7 +316,42 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
     replay = report["replay"]
     conflict = report.get("conflict") or {}
     branch_name = report["environment"]["branch"]
+    origin_ahead_count = _origin_ahead_count(report)
+    skipped_safe_commits = replay.get("skipped_safe_commits") or []
+    replay_continued_after_skip = bool(replay.get("replay_continued_after_skip"))
+    material_changes_detected = _has_material_change(report)
+    risk_level = _classify_pr_risk(report)
+
     if replay["result"] == "passed":
+        if origin_ahead_count > 0:
+            return {
+                "mode": "run",
+                "result": "needs-integration",
+                "bucket": None,
+                "run_status": "needs-integration",
+                "repair_status": "skip-safe" if skipped_safe_commits else "not-needed",
+                "action_taken": "no-op",
+                "safety_level": "safe",
+                "risk_level": risk_level,
+                "pr_status": "no-pr-needed",
+                "pr_url": None,
+                "merge_status": "not-needed",
+                "merge_commit": None,
+                "branch_name": branch_name,
+                "tests_run": [],
+                "final_validation": {"status": "not-needed", "checks": []},
+                "next_step": (
+                    f"Sandbox replay continued after safe skips, but origin/main is still {origin_ahead_count} commits ahead; "
+                    "no integration was applied."
+                    if replay_continued_after_skip or skipped_safe_commits
+                    else f"origin/main is still {origin_ahead_count} commits ahead; no integration was applied."
+                ),
+                "origin_ahead_count": origin_ahead_count,
+                "skipped_safe_commits": skipped_safe_commits,
+                "replay_continued_after_skip": replay_continued_after_skip,
+                "integration_status": "needs-integration",
+                "material_changes_detected": material_changes_detected,
+            }
         return {
             "mode": "run",
             "result": "clean",
@@ -325,7 +360,7 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
             "repair_status": "not-needed",
             "action_taken": "no-op",
             "safety_level": "safe",
-            "risk_level": "low",
+            "risk_level": risk_level,
             "pr_status": "no-pr-needed",
             "pr_url": None,
             "merge_status": "not-needed",
@@ -334,11 +369,41 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
             "tests_run": [],
             "final_validation": {"status": "not-needed", "checks": []},
             "next_step": "Replay completed cleanly; no repair was needed.",
+            "origin_ahead_count": origin_ahead_count,
+            "skipped_safe_commits": skipped_safe_commits,
+            "replay_continued_after_skip": replay_continued_after_skip,
+            "integration_status": "not-needed",
+            "material_changes_detected": material_changes_detected,
         }
 
     repair = _repair_summary(report)
-    risk_level = _classify_pr_risk(report)
     if repair["repair_status"] in {"skip-safe", "not-needed"}:
+        if origin_ahead_count > 0:
+            return {
+                "mode": "run",
+                "result": "needs-integration",
+                "bucket": repair["bucket"],
+                "run_status": "needs-integration",
+                "repair_status": repair["repair_status"],
+                "action_taken": repair["repair_action"],
+                "safety_level": repair["safety_level"],
+                "risk_level": risk_level,
+                "pr_status": "no-pr-needed",
+                "pr_url": None,
+                "merge_status": "not-needed",
+                "merge_commit": None,
+                "branch_name": branch_name,
+                "tests_run": [],
+                "final_validation": {"status": "not-needed", "checks": []},
+                "next_step": (
+                    f"{repair['next_step']} origin/main is still {origin_ahead_count} commits ahead, so the update remains incomplete."
+                ),
+                "origin_ahead_count": origin_ahead_count,
+                "skipped_safe_commits": skipped_safe_commits,
+                "replay_continued_after_skip": replay_continued_after_skip,
+                "integration_status": "needs-integration",
+                "material_changes_detected": material_changes_detected,
+            }
         return {
             "mode": "run",
             "result": repair["result"],
@@ -356,6 +421,11 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
             "tests_run": [],
             "final_validation": {"status": "not-needed", "checks": []},
             "next_step": repair["next_step"],
+            "origin_ahead_count": origin_ahead_count,
+            "skipped_safe_commits": skipped_safe_commits,
+            "replay_continued_after_skip": replay_continued_after_skip,
+            "integration_status": "not-needed",
+            "material_changes_detected": material_changes_detected,
         }
 
     return {
@@ -375,6 +445,11 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
         "tests_run": [],
         "final_validation": {"status": "not-needed", "checks": []},
         "next_step": repair["next_step"],
+        "origin_ahead_count": origin_ahead_count,
+        "skipped_safe_commits": skipped_safe_commits,
+        "replay_continued_after_skip": replay_continued_after_skip,
+        "integration_status": "blocked",
+        "material_changes_detected": material_changes_detected,
     }
 
 
@@ -418,6 +493,15 @@ def _is_high_risk_path(path: str) -> bool:
 def _has_material_change(report: dict[str, Any]) -> bool:
     repair = report.get("repair") or {}
     return repair.get("repair_status") == "applied" or bool(repair.get("changed_files") or repair.get("applied_files"))
+
+
+def _origin_ahead_count(report: dict[str, Any]) -> int:
+    environment = report.get("environment") or {}
+    if "origin_ahead_count" in report:
+        return int(report["origin_ahead_count"])
+    if "origin_ahead_count" in environment:
+        return int(environment["origin_ahead_count"])
+    return int(environment.get("behind", 0))
 
 
 def _classify_pr_risk(report: dict[str, Any]) -> str:
@@ -464,6 +548,8 @@ def _report_publication_state(report: dict[str, Any]) -> dict[str, Any]:
     derived = dict(report)
     derived.setdefault("branch_name", report["environment"]["branch"])
     derived.setdefault("risk_level", _classify_pr_risk(report))
+    derived["material_changes_detected"] = _has_material_change(report)
+    derived.setdefault("integration_status", report.get("integration_status", "not-needed"))
     if not _has_material_change(report):
         derived["pr_status"] = "no-pr-needed"
         derived["merge_status"] = "not-needed"
@@ -625,6 +711,7 @@ def _build_text_report(report: dict[str, Any]) -> str:
     ]
     lines.extend(f"  {line}" for line in env["status_before"])
     lines.append(f"Ahead/behind vs origin/main: ahead={env['ahead']} behind={env['behind']}")
+    lines.append(f"Origin ahead count: {report.get('origin_ahead_count', env.get('origin_ahead_count', env['behind']))}")
     lines.append(f"Replay base: {replay['base']}")
     lines.append(f"Rescue ref: {replay['rescue_ref']}")
     lines.append(f"Replay candidates: {replay['candidate_count']}")
@@ -632,6 +719,11 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append("Skipped duplicate commits:")
         for skipped in replay["skipped_duplicate_commits"]:
             lines.append(f"  - {skipped['commit']} {skipped['subject']} [{skipped['patch_id']}]")
+    if replay.get("skipped_safe_commits"):
+        lines.append("Skipped safe commits:")
+        for skipped in replay["skipped_safe_commits"]:
+            lines.append(f"  - {skipped['commit']} {skipped['subject']} [{skipped['bucket']}]")
+    lines.append(f"Replay continued after safe skip: {str(bool(replay.get('replay_continued_after_skip'))).lower()}")
     lines.append("")
     lines.append("Replay simulation")
     lines.append(f"Result: {replay['result']}")
@@ -670,6 +762,11 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  merge commit: {report['merge_commit'] or '<none>'}")
         lines.append(f"  branch name: {report['branch_name']}")
         lines.append(f"  next step: {report['next_step']}")
+        lines.append(f"  origin ahead count: {report.get('origin_ahead_count', report['environment'].get('origin_ahead_count', report['environment']['behind']))}")
+        lines.append(f"  skipped safe commits: {len(report.get('skipped_safe_commits') or [])}")
+        lines.append(f"  replay continued after safe skip: {str(bool(report.get('replay_continued_after_skip'))).lower()}")
+        lines.append(f"  integration status: {report.get('integration_status', 'not-needed')}")
+        lines.append(f"  material changes detected: {str(bool(report.get('material_changes_detected'))).lower()}")
         lines.append(f"  tests run: {', '.join(report['tests_run']) if report['tests_run'] else '<none>'}")
         final_validation = report.get('final_validation') or {'status': 'not-needed', 'checks': []}
         lines.append(f"  final validation: {final_validation['status']}")
@@ -723,6 +820,8 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
     worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-"))
     worktree_path = worktree_parent / "worktree"
     skipped_duplicate_commits: list[dict[str, Any]] = []
+    skipped_safe_commits: list[dict[str, Any]] = []
+    replay_continued_after_skip = False
     applied_count = 0
     conflict_commit: str | None = None
     conflict_pid: str | None = None
@@ -749,19 +848,33 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
                 continue
             cherry = _run_git(["cherry-pick", "--no-edit", commit], cwd=worktree_path, check=False)
             if cherry.returncode != 0:
+                conflict_bucket = classify_conflict(
+                    patch_id=patch_id,
+                    coverage_refs=_coverage_refs(root, commit),
+                    touched_files=files_touched,
+                    conflicted_files=_git_lines(["diff", "--name-only", "--diff-filter=U"], cwd=worktree_path),
+                    subject=subject,
+                    seen_patch_ids=seen_patch_ids,
+                )
+                if conflict_bucket.value in SAFE_SKIP_BUCKETS:
+                    _run_git(["cherry-pick", "--abort"], cwd=worktree_path, check=False)
+                    skipped_safe_commits.append(
+                        {
+                            "commit": commit,
+                            "subject": subject,
+                            "patch_id": patch_id,
+                            "bucket": conflict_bucket.value,
+                        }
+                    )
+                    replay_continued_after_skip = True
+                    if patch_id:
+                        seen_patch_ids.add(patch_id)
+                    continue
                 conflict_commit = commit
                 conflict_pid = patch_id
                 conflict_subject = subject
                 conflict_files = _git_lines(["diff", "--name-only", "--diff-filter=U"], cwd=worktree_path)
                 conflict_status = _status_lines(worktree_path)
-                conflict_bucket = classify_conflict(
-                    patch_id=patch_id,
-                    coverage_refs=_coverage_refs(root, commit),
-                    touched_files=files_touched,
-                    conflicted_files=conflict_files,
-                    subject=subject,
-                    seen_patch_ids=seen_patch_ids,
-                )
                 break
             applied_count += 1
             if patch_id:
@@ -780,12 +893,16 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
                     "status_before": status_before,
                     "ahead": ahead,
                     "behind": behind,
+                    "origin_ahead_count": behind,
+                    "origin_behind_count": ahead,
                 },
                 "replay": {
                     "base": replay_base,
                     "candidate_count": candidate_count,
                     "applied_count": applied_count,
                     "skipped_duplicate_commits": skipped_duplicate_commits,
+                    "skipped_safe_commits": skipped_safe_commits,
+                    "replay_continued_after_skip": replay_continued_after_skip,
                     "rescue_ref": rescue_ref,
                     "result": "passed",
                 },
@@ -818,12 +935,16 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
                 "status_before": status_before,
                 "ahead": ahead,
                 "behind": behind,
+                "origin_ahead_count": behind,
+                "origin_behind_count": ahead,
             },
             "replay": {
                 "base": replay_base,
                 "candidate_count": candidate_count,
                 "applied_count": applied_count,
                 "skipped_duplicate_commits": skipped_duplicate_commits,
+                "skipped_safe_commits": skipped_safe_commits,
+                "replay_continued_after_skip": replay_continued_after_skip,
                 "rescue_ref": rescue_ref,
                 "result": "conflict",
             },
