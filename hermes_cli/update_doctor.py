@@ -83,6 +83,20 @@ COVERED_UPSTREAM_COMMITS: dict[str, dict[str, Any]] = {
             "remaining full web_server failure is known baseline",
         ],
     },
+    "469e4df3c2579dcf24fbf2acc7d802a54970b460": {
+        "upstream_commit": "469e4df3c2579dcf24fbf2acc7d802a54970b460",
+        "covered_by_commits": [
+            "d8f836c6bd1e3baaebaa667ca6b0a0b4a1e2b00c",
+        ],
+        "covered_by_pr": 22,
+        "reason": "equivalent fork integration preserving dashboard profile skills with conflict resolution",
+        "evidence": [
+            "profiles tests passed",
+            "update_doctor tests passed",
+            "web build passed",
+            "remaining web_server failure is known telegram baseline",
+        ],
+    },
 }
 
 
