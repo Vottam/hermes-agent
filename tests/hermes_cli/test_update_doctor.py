@@ -279,6 +279,33 @@ def test_batch_upstream_run_skips_explicitly_covered_high_risk_commit(monkeypatc
     assert result["next_step"] == "All upstream batches were covered by fork fixes."
 
 
+def test_batch_upstream_run_marks_ae11_as_covered_and_keeps_it_unblocked(monkeypatch) -> None:
+    covered_commit = "ae11a310582ac936cbbffc516891cc2bd9fdd458"
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._plan_upstream_batches",
+        lambda root, batch_size: [{"index": 1, "size": 1, "commits": [covered_commit]}],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._batch_changed_files",
+        lambda root, commits: ["hermes_cli/web_server.py"] if commits else [],
+    )
+
+    result = _batch_upstream_run(
+        {},
+        root=Path("/tmp/hermes-update-doctor-test"),
+        request_pr=False,
+        request_auto_merge_low_risk=False,
+        batch_size=5,
+    )
+
+    assert result["coverage_used"] is True
+    assert result["batch_covered_commits"][0]["upstream_commit"] == covered_commit
+    assert any(item["upstream_commit"] == covered_commit for item in result["covered_upstream_commits"])
+    assert result["batches_blocked"] == 0
+    assert result["final_status"] == "completed"
+    assert result["next_step"] == "All upstream batches were covered by fork fixes."
+
+
 def test_batch_upstream_run_blocks_uncovered_high_risk_commit(monkeypatch) -> None:
     uncovered_commit = "feedfacefeedfacefeedfacefeedfacefeedface"
     monkeypatch.setattr(

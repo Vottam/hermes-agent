@@ -69,6 +69,20 @@ COVERED_UPSTREAM_COMMITS: dict[str, dict[str, Any]] = {
             "profile test passed",
         ],
     },
+    "ae11a310582ac936cbbffc516891cc2bd9fdd458": {
+        "upstream_commit": "ae11a310582ac936cbbffc516891cc2bd9fdd458",
+        "covered_by_commits": [
+            "19e805ec47f8b3d02c49b1bb195df4b523f19a4d",
+        ],
+        "covered_by_pr": 20,
+        "reason": "equivalent fork fix for profile setup/open-terminal endpoint",
+        "evidence": [
+            "profile/open-terminal tests passed",
+            "web build passed",
+            "update_doctor tests passed",
+            "remaining full web_server failure is known baseline",
+        ],
+    },
 }
 
 
