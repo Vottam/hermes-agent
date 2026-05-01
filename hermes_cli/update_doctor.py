@@ -321,6 +321,38 @@ def _run_summary(report: dict[str, Any]) -> dict[str, Any]:
     replay_continued_after_skip = bool(replay.get("replay_continued_after_skip"))
     material_changes_detected = _has_material_change(report)
     risk_level = _classify_pr_risk(report)
+    integration_blockers = _integration_blockers(report)
+    integration_risk_level = _integration_risk_level(report)
+
+    if "broad-upstream-sync" in integration_blockers:
+        return {
+            "mode": "run",
+            "result": "blocked",
+            "bucket": None,
+            "run_status": "blocked",
+            "repair_status": "skip-safe" if skipped_safe_commits else "not-needed",
+            "action_taken": "no-op",
+            "safety_level": "guarded",
+            "risk_level": risk_level,
+            "integration_risk_level": integration_risk_level,
+            "integration_blockers": integration_blockers,
+            "pr_status": "not-created-risk",
+            "pr_url": None,
+            "merge_status": "not-needed",
+            "merge_commit": None,
+            "branch_name": branch_name,
+            "tests_run": [],
+            "final_validation": {"status": "not-needed", "checks": []},
+            "next_step": (
+                f"Broad upstream sync detected: origin/main is still {origin_ahead_count} commits ahead; "
+                "no integration, PR creation, or merge was attempted."
+            ),
+            "origin_ahead_count": origin_ahead_count,
+            "skipped_safe_commits": skipped_safe_commits,
+            "replay_continued_after_skip": replay_continued_after_skip,
+            "integration_status": "blocked-high-risk",
+            "material_changes_detected": material_changes_detected,
+        }
 
     if replay["result"] == "passed":
         if origin_ahead_count > 0:
@@ -504,6 +536,20 @@ def _origin_ahead_count(report: dict[str, Any]) -> int:
     return int(environment.get("behind", 0))
 
 
+BROAD_UPSTREAM_SYNC_THRESHOLD = 20
+
+
+def _integration_blockers(report: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    if _origin_ahead_count(report) >= BROAD_UPSTREAM_SYNC_THRESHOLD:
+        blockers.append("broad-upstream-sync")
+    return blockers
+
+
+def _integration_risk_level(report: dict[str, Any]) -> str:
+    return "high" if _integration_blockers(report) else "low"
+
+
 def _classify_pr_risk(report: dict[str, Any]) -> str:
     if not _has_material_change(report):
         return "low"
@@ -548,10 +594,19 @@ def _report_publication_state(report: dict[str, Any]) -> dict[str, Any]:
     derived = dict(report)
     derived.setdefault("branch_name", report["environment"]["branch"])
     derived.setdefault("risk_level", _classify_pr_risk(report))
+    derived.setdefault("integration_blockers", _integration_blockers(report))
+    derived.setdefault("integration_risk_level", _integration_risk_level(report))
+    if derived["integration_risk_level"] == "high":
+        derived["integration_status"] = "blocked-high-risk"
+        derived["pr_status"] = "not-created-risk"
+        derived["merge_status"] = "not-needed"
+        derived.setdefault("pr_url", None)
+        derived.setdefault("merge_commit", None)
+        derived.setdefault("final_validation", {"status": "not-needed", "checks": []})
     derived["material_changes_detected"] = _has_material_change(report)
     derived.setdefault("integration_status", report.get("integration_status", "not-needed"))
     if not _has_material_change(report):
-        derived["pr_status"] = "no-pr-needed"
+        derived["pr_status"] = "not-created-risk" if derived["integration_risk_level"] == "high" else "no-pr-needed"
         derived["merge_status"] = "not-needed"
         derived.setdefault("pr_url", None)
         derived.setdefault("merge_commit", None)
@@ -634,6 +689,8 @@ def _refresh_main_and_validate(root: Path) -> list[str]:
 
 def _publish_run_artifacts(report: dict[str, Any], *, root: Path, request_pr: bool, request_auto_merge_low_risk: bool) -> dict[str, Any]:
     published = _report_publication_state(report)
+    if published.get("pr_status") == "not-created-risk":
+        return published
     if not request_pr or not _has_material_change(report):
         return published
 
@@ -756,6 +813,9 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  action taken: {report['action_taken']}")
         lines.append(f"  safety level: {report['safety_level']}")
         lines.append(f"  risk level: {report['risk_level']}")
+        lines.append(f"  integration risk level: {report.get('integration_risk_level', 'low')}")
+        blockers = report.get('integration_blockers') or []
+        lines.append(f"  integration blockers: {', '.join(blockers) if blockers else '<none>'}")
         lines.append(f"  pr status: {report['pr_status']}")
         lines.append(f"  pr url: {report['pr_url'] or '<none>'}")
         lines.append(f"  merge status: {report['merge_status']}")
