@@ -537,6 +537,51 @@ def _origin_ahead_count(report: dict[str, Any]) -> int:
 
 
 BROAD_UPSTREAM_SYNC_THRESHOLD = 20
+BATCH_UPSTREAM_DEFAULT_SIZE = 5
+
+
+def _upstream_candidate_commits(root: Path, upstream_ref: str = "origin/main") -> list[str]:
+    return _git_lines(
+        ["rev-list", "--reverse", "--no-merges", "--right-only", "--cherry-pick", f"HEAD...{upstream_ref}"],
+        cwd=root,
+    )
+
+
+def _plan_upstream_batches(root: Path, batch_size: int) -> list[dict[str, Any]]:
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    candidates = _upstream_candidate_commits(root)
+    batches: list[dict[str, Any]] = []
+    for index, offset in enumerate(range(0, len(candidates), batch_size), start=1):
+        commits = candidates[offset : offset + batch_size]
+        batches.append(
+            {
+                "index": index,
+                "size": len(commits),
+                "commits": commits,
+                "first_commit": commits[0] if commits else None,
+                "last_commit": commits[-1] if commits else None,
+            }
+        )
+    return batches
+
+
+def _batch_changed_files(root: Path, commits: Sequence[str]) -> list[str]:
+    files: set[str] = set()
+    for commit in commits:
+        files.update(_commit_files(root, commit))
+    return sorted(files)
+
+
+def _classify_upstream_batch_risk(root: Path, commits: Sequence[str]) -> str:
+    files = _batch_changed_files(root, commits)
+    if not files:
+        return "low"
+    if any(_is_high_risk_path(path) for path in files):
+        return "high"
+    if all(_is_low_risk_path(path) for path in files):
+        return "low"
+    return "medium"
 
 
 def _integration_blockers(report: dict[str, Any]) -> list[str]:
@@ -687,7 +732,14 @@ def _refresh_main_and_validate(root: Path) -> list[str]:
     return checks
 
 
-def _publish_run_artifacts(report: dict[str, Any], *, root: Path, request_pr: bool, request_auto_merge_low_risk: bool) -> dict[str, Any]:
+def _publish_run_artifacts(
+    report: dict[str, Any],
+    *,
+    root: Path,
+    request_pr: bool,
+    request_auto_merge_low_risk: bool,
+    refresh_after_merge: bool = True,
+) -> dict[str, Any]:
     published = _report_publication_state(report)
     if published.get("pr_status") == "not-created-risk":
         return published
@@ -723,10 +775,235 @@ def _publish_run_artifacts(report: dict[str, Any], *, root: Path, request_pr: bo
     published["merge_status"] = "merged"
     published["merge_commit"] = merge_output
     published["action_taken"] = "pr-created-and-merged"
-    published["final_validation"] = {"status": "passed", "checks": _refresh_main_and_validate(root)}
-    published["tests_run"] = ["./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q"]
-    published["next_step"] = "Merged low-risk PR and refreshed main locally."
+    if refresh_after_merge:
+        published["final_validation"] = {"status": "passed", "checks": _refresh_main_and_validate(root)}
+        published["tests_run"] = ["./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q"]
+        published["next_step"] = "Merged low-risk PR and refreshed main locally."
+    else:
+        published.setdefault("final_validation", {"status": "not-run", "checks": []})
+        published.setdefault("tests_run", [])
+        published["next_step"] = "Merged low-risk PR; main refresh deferred to the caller."
     return published
+
+
+def _process_upstream_batch(
+    report: dict[str, Any],
+    *,
+    root: Path,
+    batch: dict[str, Any],
+    request_pr: bool,
+    request_auto_merge_low_risk: bool,
+    refresh_after_merge: bool = True,
+) -> dict[str, Any]:
+    batch_commits = list(batch["commits"])
+    batch_files = _batch_changed_files(root, batch_commits)
+    batch_risk = _classify_upstream_batch_risk(root, batch_commits)
+    batch_label = f"{batch['index']:02d}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    branch_name = f"update-doctor-batch-upstream-{batch_label}"
+    worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-batch-"))
+    worktree_path = worktree_parent / "worktree"
+
+    try:
+        _run_git(["worktree", "add", "--detach", str(worktree_path), "fork/main"], cwd=root)
+        _run_git(["switch", "-c", branch_name], cwd=worktree_path)
+
+        for commit in batch_commits:
+            cherry = _run_git(["cherry-pick", "--no-edit", commit], cwd=worktree_path, check=False)
+            if cherry.returncode != 0:
+                conflict_bucket = classify_conflict(
+                    patch_id=_commit_patch_id(root, commit),
+                    coverage_refs=_coverage_refs(root, commit),
+                    touched_files=_commit_files(root, commit),
+                    conflicted_files=_git_lines(["diff", "--name-only", "--diff-filter=U"], cwd=worktree_path),
+                    subject=_commit_subject(root, commit),
+                )
+                _run_git(["cherry-pick", "--abort"], cwd=worktree_path, check=False)
+                return {
+                    "status": "blocked",
+                    "reason": f"batch-conflict:{conflict_bucket.value}",
+                    "risk": batch_risk,
+                    "commits": batch_commits,
+                    "files": batch_files,
+                    "branch_name": branch_name,
+                    "pr_url": None,
+                    "merge_commit": None,
+                    "published": None,
+                }
+
+        batch_report = dict(report)
+        batch_report["tool"] = dict(report["tool"])
+        batch_report["tool"]["mode"] = "run"
+        batch_report["environment"] = dict(report["environment"])
+        batch_report["environment"]["branch"] = branch_name
+        batch_report["environment"]["status_before"] = _status_lines(worktree_path)
+        batch_report["repair"] = {
+            "mode": "repair",
+            "result": "changed",
+            "bucket": "batch-upstream",
+            "repair_status": "applied",
+            "repair_action": "batch-applied",
+            "safety_level": "safe",
+            "next_step": "Batch applied",
+            "changed_files": batch_files,
+        }
+        batch_report["verification"] = {"origin_untouched": True, "main_untouched": True}
+
+        published = _publish_run_artifacts(
+            batch_report,
+            root=worktree_path,
+            request_pr=request_pr,
+            request_auto_merge_low_risk=request_auto_merge_low_risk,
+            refresh_after_merge=refresh_after_merge,
+        )
+        return {
+            "status": published.get("merge_status") if published.get("merge_status") == "merged" else published.get("pr_status", "published"),
+            "reason": None if published.get("merge_status") == "merged" else published.get("next_step"),
+            "risk": batch_risk,
+            "commits": batch_commits,
+            "files": batch_files,
+            "branch_name": branch_name,
+            "pr_url": published.get("pr_url"),
+            "merge_commit": published.get("merge_commit"),
+            "published": published,
+            "worktree_parent": worktree_parent,
+            "worktree_path": worktree_path,
+        }
+    finally:
+        _run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=root, check=False)
+        shutil.rmtree(worktree_parent, ignore_errors=True)
+
+
+def _batch_upstream_run(
+    report: dict[str, Any],
+    *,
+    root: Path,
+    request_pr: bool,
+    request_auto_merge_low_risk: bool,
+    batch_size: int,
+) -> dict[str, Any]:
+    batches = _plan_upstream_batches(root, batch_size)
+    summary: dict[str, Any] = {
+        "batch_upstream": True,
+        "batch_size": batch_size,
+        "batches_total": len(batches),
+        "batches_processed": 0,
+        "batches_merged": 0,
+        "batches_blocked": 0,
+        "blocked_batch_reason": None,
+        "blocked_batch_commits": [],
+        "blocked_batch_files": [],
+        "pr_urls": [],
+        "merge_commits": [],
+        "upstream_batches": [],
+        "final_status": "completed" if not batches else "planned",
+        "integration_status": "batched-upstream",
+        "integration_risk_level": "low",
+        "integration_blockers": [],
+        "run_status": "completed" if not batches else "planned",
+        "pr_status": "no-pr-needed",
+        "merge_status": "not-needed",
+        "risk_level": "low",
+        "material_changes_detected": False,
+        "tests_run": [],
+        "final_validation": {"status": "not-needed", "checks": []},
+        "next_step": "No upstream batches were pending." if not batches else f"Planned {len(batches)} upstream batches of size {batch_size}.",
+    }
+
+    if not batches:
+        return summary
+
+    for batch in batches:
+        batch_risk = _classify_upstream_batch_risk(root, batch["commits"])
+        batch_files = _batch_changed_files(root, batch["commits"])
+        summary["batches_processed"] += 1
+        summary["upstream_batches"].append(
+            {
+                "index": batch["index"],
+                "size": batch["size"],
+                "commits": batch["commits"],
+                "files": batch_files,
+                "risk": batch_risk,
+            }
+        )
+
+        if batch_risk != "low":
+            summary["batches_blocked"] += 1
+            summary["blocked_batch_reason"] = f"batch-risk:{batch_risk}"
+            summary["blocked_batch_commits"] = batch["commits"]
+            summary["blocked_batch_files"] = batch_files
+            summary["final_status"] = "blocked"
+            summary["run_status"] = "blocked"
+            summary["integration_status"] = "blocked-batch-risk"
+            summary["integration_risk_level"] = batch_risk
+            summary["integration_blockers"] = ["batch-upstream-high-risk"]
+            summary["next_step"] = f"Batch {batch['index']} blocked as {batch_risk}; no further batches were attempted."
+            break
+
+        if not request_pr:
+            continue
+
+        batch_result = _process_upstream_batch(
+            report,
+            root=root,
+            batch=batch,
+            request_pr=True,
+            request_auto_merge_low_risk=request_auto_merge_low_risk,
+            refresh_after_merge=False,
+        )
+        summary["pr_urls"].append(batch_result.get("pr_url"))
+        if batch_result.get("status") == "blocked":
+            summary["batches_blocked"] += 1
+            summary["blocked_batch_reason"] = batch_result.get("reason") or "batch-processing-blocked"
+            summary["blocked_batch_commits"] = batch_result.get("commits") or batch["commits"]
+            summary["blocked_batch_files"] = batch_result.get("files") or batch_files
+            summary["final_status"] = "blocked"
+            summary["run_status"] = "blocked"
+            summary["integration_status"] = "blocked-batch-risk"
+            summary["integration_risk_level"] = batch_risk
+            summary["integration_blockers"] = [summary["blocked_batch_reason"]] if summary["blocked_batch_reason"] else ["batch-upstream-blocked"]
+            summary["next_step"] = f"Batch {batch['index']} blocked during application; no further batches were attempted."
+            break
+
+        if batch_result.get("merge_commit"):
+            summary["batches_merged"] += 1
+            summary["merge_commits"].append(batch_result["merge_commit"])
+            refresh_checks = _refresh_main_and_validate(root)
+            summary["tests_run"] = refresh_checks
+            summary["final_validation"] = {"status": "passed", "checks": refresh_checks}
+            summary["next_step"] = f"Batch {batch['index']} merged successfully."
+            continue
+
+        published = batch_result.get("published") or {}
+        merge_status = published.get("merge_status")
+        if merge_status == "blocked":
+            summary["batches_blocked"] += 1
+            summary["blocked_batch_reason"] = published.get("next_step") or "batch-auto-merge-blocked"
+            summary["blocked_batch_commits"] = batch["commits"]
+            summary["blocked_batch_files"] = batch_files
+            summary["final_status"] = "blocked"
+            summary["run_status"] = "blocked"
+            summary["integration_status"] = "blocked-batch-risk"
+            summary["integration_risk_level"] = batch_risk
+            summary["integration_blockers"] = ["batch-auto-merge-blocked"]
+            summary["next_step"] = f"Batch {batch['index']} PR was not mergeable/clean enough for auto-merge."
+            break
+
+        summary["next_step"] = f"Batch {batch['index']} PR created; auto-merge was not performed."
+        summary["final_status"] = "pr-created"
+        summary["run_status"] = "needs-integration"
+        summary["integration_status"] = "batched-upstream"
+        summary["integration_risk_level"] = "low"
+        summary["integration_blockers"] = []
+
+    if summary["batches_blocked"] == 0 and summary["batches_merged"] == summary["batches_total"]:
+        summary["final_status"] = "completed"
+        summary["run_status"] = "completed"
+        summary["integration_status"] = "batched-completed"
+        summary["integration_risk_level"] = "low"
+        summary["integration_blockers"] = []
+        summary["next_step"] = "All upstream batches were processed successfully."
+    summary["material_changes_detected"] = summary["batches_merged"] > 0 or bool(summary["pr_urls"])
+    return summary
 
 
 def _with_mode(report: dict[str, Any], mode: str, *, repair: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -832,6 +1109,20 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  final validation: {final_validation['status']}")
         if final_validation.get('checks'):
             lines.append(f"    checks: {', '.join(final_validation['checks'])}")
+    if report.get("batch_upstream"):
+        lines.append("")
+        lines.append("Batch upstream")
+        lines.append(f"  batch size: {report.get('batch_size')}")
+        lines.append(f"  batches total: {report.get('batches_total')}")
+        lines.append(f"  batches processed: {report.get('batches_processed')}")
+        lines.append(f"  batches merged: {report.get('batches_merged')}")
+        lines.append(f"  batches blocked: {report.get('batches_blocked')}")
+        lines.append(f"  blocked batch reason: {report.get('blocked_batch_reason') or '<none>'}")
+        lines.append(f"  blocked batch commits: {len(report.get('blocked_batch_commits') or [])}")
+        lines.append(f"  blocked batch files: {len(report.get('blocked_batch_files') or [])}")
+        lines.append(f"  pr urls: {len(report.get('pr_urls') or [])}")
+        lines.append(f"  merge commits: {len(report.get('merge_commits') or [])}")
+        lines.append(f"  final status: {report.get('final_status')}")
     repair = report.get("repair")
     if repair:
         lines.append("")
@@ -1053,6 +1344,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Automatically merge low-risk PRs after review metadata checks",
     )
     parser.add_argument(
+        "--batch-upstream",
+        action="store_true",
+        help="Process broad upstream syncs in small low-risk batches",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_UPSTREAM_DEFAULT_SIZE,
+        help="Batch size for upstream processing (default: 5)",
+    )
+    parser.add_argument(
         "--format",
         choices=("text", "json", "yaml"),
         default="text",
@@ -1070,24 +1372,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--pr is only supported with --run")
     if args.auto_merge_low_risk and not args.run:
         parser.error("--auto-merge-low-risk is only supported with --run")
+    if args.batch_upstream and not args.run:
+        parser.error("--batch-upstream is only supported with --run")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be >= 1")
 
-    report = build_report(replay_base=args.replay_base)
+    root = _require_repo_root()
+    report = build_report(cwd=root, replay_base=args.replay_base)
     exit_code = 0 if report["replay"]["result"] == "passed" else 1
 
     if args.run:
-        run = _run_summary(report)
-        report = _with_mode(report, "run")
-        report.update(run)
-        exit_code = 0 if run["run_status"] in {"clean", "completed"} else 1
-        if args.pr:
-            root = _require_repo_root()
-            published = _publish_run_artifacts(
+        if args.batch_upstream and _origin_ahead_count(report) >= BROAD_UPSTREAM_SYNC_THRESHOLD:
+            batch_summary = _batch_upstream_run(
                 report,
                 root=root,
-                request_pr=True,
+                request_pr=args.pr,
                 request_auto_merge_low_risk=args.auto_merge_low_risk,
+                batch_size=args.batch_size,
             )
-            report.update(published)
+            report = _with_mode(report, "run")
+            report.update(batch_summary)
+            exit_code = 0 if batch_summary["final_status"] == "completed" else 1
+        else:
+            run = _run_summary(report)
+            report = _with_mode(report, "run")
+            report.update(run)
+            exit_code = 0 if run["run_status"] in {"clean", "completed"} else 1
+            if args.pr:
+                published = _publish_run_artifacts(
+                    report,
+                    root=root,
+                    request_pr=True,
+                    request_auto_merge_low_risk=args.auto_merge_low_risk,
+                )
+                report.update(published)
     elif args.repair:
         repair = _repair_summary(report)
         report = _with_mode(report, "repair", repair=repair)
