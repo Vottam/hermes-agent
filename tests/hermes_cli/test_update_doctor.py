@@ -570,7 +570,7 @@ def test_fallback_batch_to_individual_commits_blocks_on_runtime(monkeypatch) -> 
     assert summary["fallback_blocked_files"] == ["hermes_cli/main.py"]
     assert summary["fallback_blocked_reason"] == "batch-risk:high"
     assert process_calls == [("docs",)]
-def test_fallback_batch_to_individual_commits_triages_medium_commit(monkeypatch) -> None:
+def test_fallback_batch_to_individual_commits_blocks_medium_commit_when_sandbox_tests_fail(monkeypatch) -> None:
     report = _sample_report(replay_result="passed", conflict=None)
     batch = {
         "index": 1,
@@ -604,45 +604,201 @@ def test_fallback_batch_to_individual_commits_triages_medium_commit(monkeypatch)
     monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[tuple(args[1])])
     monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", lambda *args, **kwargs: file_map[tuple(args[1])])
     monkeypatch.setattr(
+        "hermes_cli.update_doctor._run_medium_commit_sandbox_tests",
+        lambda *args, **kwargs: {
+            "status": "failed",
+            "tests_run": ["pytest tests/hermes_cli/test_web_server.py -k profile -q"],
+            "tests_passed": [],
+            "test_failures": ["pytest tests/hermes_cli/test_web_server.py -k profile -q (exit 1)"],
+            "branch_name": "update-doctor-medium-tested-4523965d",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._process_upstream_batch",
+        lambda *args, **kwargs: process_calls.append(tuple(kwargs["batch"]["commits"])) or (_ for _ in ()).throw(AssertionError("medium-tested PR should not be created when sandbox tests fail")),
+    )
+
+    summary = _fallback_batch_to_individual_commits(report, root=REPO_ROOT, batch=batch, request_pr=False, request_auto_merge_low_risk=True)
+
+    assert summary["status"] == "blocked"
+    assert summary["fallback_blocked_commit"] == "4523965de9eb9a55ba7a67315adc3188c31eaec4"
+    assert summary["fallback_blocked_reason"] == "medium-tests-failed"
+    assert summary["medium_triage_used"] is True
+    assert summary["medium_tested_status"] == "failed"
+    assert summary["medium_pr_eligible"] is False
+    assert summary["medium_tests_run"] == ["pytest tests/hermes_cli/test_web_server.py -k profile -q"]
+    assert summary["medium_tests_passed"] == []
+    assert summary["medium_test_failures"] == ["pytest tests/hermes_cli/test_web_server.py -k profile -q (exit 1)"]
+    assert process_calls == []
+
+
+def test_fallback_batch_to_individual_commits_marks_medium_tested_without_pr(monkeypatch) -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    batch = {
+        "index": 1,
+        "size": 2,
+        "commits": ["docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"],
+        "first_commit": "docs",
+        "last_commit": "4523965de9eb9a55ba7a67315adc3188c31eaec4",
+    }
+    risk_map = {
+        ("docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"): "high",
+        ("docs",): "low",
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",): "medium",
+    }
+    medium_files = [
+        "hermes_cli/web_server.py",
+        "tests/hermes_cli/test_web_server.py",
+        "web/src/App.tsx",
+        "web/src/i18n/en.ts",
+        "web/src/i18n/types.ts",
+        "web/src/i18n/zh.ts",
+        "web/src/lib/api.ts",
+        "web/src/pages/ProfilesPage.tsx",
+    ]
+    file_map = {
+        ("docs",): ["docs/notes.md"],
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",): medium_files,
+        ("docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"): ["docs/notes.md", *medium_files],
+    }
+
+    monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[tuple(args[1])])
+    monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", lambda *args, **kwargs: file_map[tuple(args[1])])
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._run_medium_commit_sandbox_tests",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "tests_run": [
+                "pytest tests/hermes_cli/test_web_server.py -k profile -q",
+                "cd web && npm run build",
+                "pytest tests/hermes_cli/test_web_server.py -q",
+            ],
+            "tests_passed": [
+                "pytest tests/hermes_cli/test_web_server.py -k profile -q",
+                "cd web && npm run build",
+                "pytest tests/hermes_cli/test_web_server.py -q",
+            ],
+            "test_failures": [],
+            "branch_name": "update-doctor-medium-tested-4523965d",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._process_upstream_batch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("medium-tested PR should not be created when --pr is disabled")),
+    )
+
+    summary = _fallback_batch_to_individual_commits(report, root=REPO_ROOT, batch=batch, request_pr=False, request_auto_merge_low_risk=True)
+
+    assert summary["status"] == "medium-tested"
+    assert summary["pr_status"] == "available-not-created"
+    assert summary["merge_status"] == "not-needed"
+    assert summary["medium_triage_used"] is True
+    assert summary["medium_tested_status"] == "passed"
+    assert summary["medium_pr_eligible"] is True
+    assert summary["medium_tests_run"] == [
+        "pytest tests/hermes_cli/test_web_server.py -k profile -q",
+        "cd web && npm run build",
+        "pytest tests/hermes_cli/test_web_server.py -q",
+    ]
+    assert summary["medium_tests_passed"] == summary["medium_tests_run"]
+    assert summary["medium_test_failures"] == []
+
+
+def test_fallback_batch_to_individual_commits_creates_pr_for_medium_tested_commit_without_auto_merge(monkeypatch) -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    batch = {
+        "index": 1,
+        "size": 2,
+        "commits": ["docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"],
+        "first_commit": "docs",
+        "last_commit": "4523965de9eb9a55ba7a67315adc3188c31eaec4",
+    }
+    risk_map = {
+        ("docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"): "high",
+        ("docs",): "low",
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",): "medium",
+    }
+    medium_files = [
+        "hermes_cli/web_server.py",
+        "tests/hermes_cli/test_web_server.py",
+        "web/src/App.tsx",
+        "web/src/i18n/en.ts",
+        "web/src/i18n/types.ts",
+        "web/src/i18n/zh.ts",
+        "web/src/lib/api.ts",
+        "web/src/pages/ProfilesPage.tsx",
+    ]
+    file_map = {
+        ("docs",): ["docs/notes.md"],
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",): medium_files,
+        ("docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"): ["docs/notes.md", *medium_files],
+    }
+    process_calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[tuple(args[1])])
+    monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", lambda *args, **kwargs: file_map[tuple(args[1])])
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._run_medium_commit_sandbox_tests",
+        lambda *args, **kwargs: {
+            "status": "passed",
+            "tests_run": [
+                "pytest tests/hermes_cli/test_web_server.py -k profile -q",
+                "cd web && npm run build",
+                "pytest tests/hermes_cli/test_web_server.py -q",
+            ],
+            "tests_passed": [
+                "pytest tests/hermes_cli/test_web_server.py -k profile -q",
+                "cd web && npm run build",
+                "pytest tests/hermes_cli/test_web_server.py -q",
+            ],
+            "test_failures": [],
+            "branch_name": "update-doctor-medium-tested-4523965d",
+        },
+    )
+    monkeypatch.setattr(
         "hermes_cli.update_doctor._process_upstream_batch",
         lambda *args, **kwargs: process_calls.append(tuple(kwargs["batch"]["commits"])) or {
-            "status": "merged",
+            "status": "created",
             "reason": None,
-            "risk": "low",
+            "risk": "medium",
             "commits": kwargs["batch"]["commits"],
             "files": file_map[tuple(kwargs["batch"]["commits"])],
             "branch_name": "update-doctor-batch-upstream-01",
-            "pr_url": "https://github.com/Vottam/hermes-agent/pull/101",
-            "merge_commit": "merge-docs",
-            "published": {"tests_run": ["pytest"], "final_validation": {"status": "passed", "checks": ["pytest"]}, "merge_status": "merged"},
+            "pr_url": "https://github.com/Vottam/hermes-agent/pull/202" if tuple(kwargs["batch"]["commits"]) == ("4523965de9eb9a55ba7a67315adc3188c31eaec4",) else "https://github.com/Vottam/hermes-agent/pull/101",
+            "merge_commit": None,
+            "published": {
+                "pr_status": "created",
+                "merge_status": "not-eligible",
+                "next_step": "PR created, but auto-merge is blocked because risk is not low.",
+                "final_validation": {"status": "not-run", "checks": []},
+                "tests_run": [],
+            },
         },
     )
 
     summary = _fallback_batch_to_individual_commits(report, root=REPO_ROOT, batch=batch, request_pr=True, request_auto_merge_low_risk=True)
 
-    assert summary["batch_fallback_used"] is True
-    assert summary["fallback_from_batch_size"] == 2
-    assert summary["fallback_commits_processed"] == 2
-    assert summary["fallback_commits_merged"] == 1
-    assert summary["fallback_blocked_commit"] == "4523965de9eb9a55ba7a67315adc3188c31eaec4"
-    assert summary["fallback_blocked_files"] == medium_files
-    assert summary["fallback_blocked_reason"] == "batch-risk:medium"
-    assert summary["medium_triage_used"] is True
-    assert summary["medium_blocked_commit"] == "4523965de9eb9a55ba7a67315adc3188c31eaec4"
-    assert summary["medium_blocked_subject"] == "feat(dashboard): add profiles management page"
-    assert summary["medium_blocked_files"] == medium_files
-    assert summary["medium_blocked_reasons"] == [
-        "touches hermes_cli/web_server.py (runtime web server path)",
-        "touches web UI/API files (6 path(s))",
-        "updates targeted tests (1 path(s))",
+    assert summary["status"] == "pr-created"
+    assert summary["pr_status"] == "created"
+    assert summary["merge_status"] == "not-eligible"
+    assert summary["pr_urls"] == [
+        "https://github.com/Vottam/hermes-agent/pull/101",
+        "https://github.com/Vottam/hermes-agent/pull/202",
     ]
-    assert summary["medium_suggested_tests"] == [
+    assert summary["medium_triage_used"] is True
+    assert summary["medium_tested_status"] == "passed"
+    assert summary["medium_pr_eligible"] is True
+    assert summary["medium_tests_run"] == [
         "pytest tests/hermes_cli/test_web_server.py -k profile -q",
         "cd web && npm run build",
         "pytest tests/hermes_cli/test_web_server.py -q",
     ]
-    assert summary["medium_reclassification_candidate"] is True
-    assert process_calls == [("docs",)]
+    assert summary["medium_tests_passed"] == summary["medium_tests_run"]
+    assert summary["medium_test_failures"] == []
+    assert process_calls == [
+        ("docs",),
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",),
+    ]
 
 
 def test_batch_upstream_auto_merge_requires_mergeable_clean(monkeypatch) -> None:
