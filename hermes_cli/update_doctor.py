@@ -873,6 +873,148 @@ def _process_upstream_batch(
         shutil.rmtree(worktree_parent, ignore_errors=True)
 
 
+def _process_upstream_batch_with_fallback(
+    report: dict[str, Any],
+    *,
+    root: Path,
+    batch: dict[str, Any],
+    request_pr: bool,
+    request_auto_merge_low_risk: bool,
+    refresh_after_merge: bool = True,
+) -> dict[str, Any]:
+    batch_commits = list(batch["commits"])
+    batch_files = _batch_changed_files(root, batch_commits)
+    batch_risk = _classify_upstream_batch_risk(root, batch_commits)
+    result = _process_upstream_batch(
+        report,
+        root=root,
+        batch=batch,
+        request_pr=request_pr,
+        request_auto_merge_low_risk=request_auto_merge_low_risk,
+        refresh_after_merge=refresh_after_merge,
+    )
+    result.setdefault("batch_fallback_used", False)
+    result.setdefault("fallback_from_batch_size", batch["size"])
+    result.setdefault("fallback_commits_processed", len(batch_commits))
+    result.setdefault("fallback_commits_merged", 1 if result.get("merge_commit") else 0)
+    result.setdefault("fallback_blocked_commit", None)
+    result.setdefault("fallback_blocked_files", [])
+    result.setdefault("fallback_blocked_reason", None)
+    result["batch_files"] = batch_files
+    result["batch_risk"] = batch_risk
+    return result
+
+
+def _fallback_batch_to_individual_commits(
+    report: dict[str, Any],
+    *,
+    root: Path,
+    batch: dict[str, Any],
+    request_pr: bool,
+    request_auto_merge_low_risk: bool,
+) -> dict[str, Any]:
+    batch_commits = list(batch["commits"])
+    fallback: dict[str, Any] = {
+        "status": "completed",
+        "reason": None,
+        "risk": "high",
+        "commits": batch_commits,
+        "files": _batch_changed_files(root, batch_commits),
+        "batch_fallback_used": True,
+        "fallback_from_batch_size": batch["size"],
+        "fallback_commits_processed": 0,
+        "fallback_commits_merged": 0,
+        "fallback_blocked_commit": None,
+        "fallback_blocked_files": [],
+        "fallback_blocked_reason": None,
+        "pr_urls": [],
+        "merge_commits": [],
+        "published": [],
+        "tests_run": [],
+        "final_validation": {"status": "not-needed", "checks": []},
+    }
+
+    for offset, commit in enumerate(batch_commits, start=1):
+        single_risk = _classify_upstream_batch_risk(root, [commit])
+        single_files = _batch_changed_files(root, [commit])
+        fallback["fallback_commits_processed"] += 1
+
+        if single_risk != "low":
+            fallback.update(
+                {
+                    "status": "blocked",
+                    "reason": f"batch-risk:{single_risk}",
+                    "risk": single_risk,
+                    "fallback_blocked_commit": commit,
+                    "fallback_blocked_files": single_files,
+                    "fallback_blocked_reason": f"batch-risk:{single_risk}",
+                }
+            )
+            return fallback
+
+        if not request_pr:
+            continue
+
+        single_batch = {
+            "index": f"{batch['index']}.{offset}",
+            "size": 1,
+            "commits": [commit],
+            "first_commit": commit,
+            "last_commit": commit,
+        }
+        single_result = _process_upstream_batch(
+            report,
+            root=root,
+            batch=single_batch,
+            request_pr=True,
+            request_auto_merge_low_risk=request_auto_merge_low_risk,
+            refresh_after_merge=False,
+        )
+        fallback["pr_urls"].append(single_result.get("pr_url"))
+
+        if single_result.get("status") == "blocked":
+            fallback.update(
+                {
+                    "status": "blocked",
+                    "reason": single_result.get("reason") or "batch-processing-blocked",
+                    "risk": single_result.get("risk") or single_risk,
+                    "fallback_blocked_commit": commit,
+                    "fallback_blocked_files": single_result.get("files") or single_files,
+                    "fallback_blocked_reason": single_result.get("reason") or "batch-processing-blocked",
+                }
+            )
+            return fallback
+
+        published = single_result.get("published") or {}
+        if published.get("merge_status") == "blocked":
+            fallback.update(
+                {
+                    "status": "blocked",
+                    "reason": published.get("next_step") or "batch-auto-merge-blocked",
+                    "risk": single_risk,
+                    "fallback_blocked_commit": commit,
+                    "fallback_blocked_files": single_files,
+                    "fallback_blocked_reason": published.get("next_step") or "batch-auto-merge-blocked",
+                }
+            )
+            return fallback
+
+        if single_result.get("merge_commit"):
+            fallback["fallback_commits_merged"] += 1
+            fallback["merge_commits"].append(single_result["merge_commit"])
+            fallback["tests_run"] = published.get("tests_run") or fallback["tests_run"]
+            fallback["final_validation"] = published.get("final_validation") or fallback["final_validation"]
+        else:
+            fallback["status"] = "pr-created"
+            fallback["reason"] = published.get("next_step") or single_result.get("reason")
+
+    if fallback["fallback_commits_processed"] and fallback["fallback_commits_merged"] == fallback["fallback_commits_processed"]:
+        fallback["status"] = "completed"
+        fallback["reason"] = None
+    fallback["material_changes_detected"] = fallback["fallback_commits_merged"] > 0 or bool(fallback["pr_urls"])
+    return fallback
+
+
 def _batch_upstream_run(
     report: dict[str, Any],
     *,
@@ -895,6 +1037,13 @@ def _batch_upstream_run(
         "pr_urls": [],
         "merge_commits": [],
         "upstream_batches": [],
+        "batch_fallback_used": False,
+        "fallback_from_batch_size": None,
+        "fallback_commits_processed": 0,
+        "fallback_commits_merged": 0,
+        "fallback_blocked_commit": None,
+        "fallback_blocked_files": [],
+        "fallback_blocked_reason": None,
         "final_status": "completed" if not batches else "planned",
         "integration_status": "batched-upstream",
         "integration_risk_level": "low",
@@ -925,6 +1074,56 @@ def _batch_upstream_run(
                 "risk": batch_risk,
             }
         )
+
+        if batch_risk != "low" and len(batch["commits"]) > 1:
+            fallback_result = _fallback_batch_to_individual_commits(
+                report,
+                root=root,
+                batch=batch,
+                request_pr=request_pr,
+                request_auto_merge_low_risk=request_auto_merge_low_risk,
+            )
+            summary["batch_fallback_used"] = True
+            summary["fallback_from_batch_size"] = batch["size"]
+            summary["fallback_commits_processed"] += fallback_result.get("fallback_commits_processed", 0)
+            summary["fallback_commits_merged"] += fallback_result.get("fallback_commits_merged", 0)
+            summary["pr_urls"].extend([url for url in fallback_result.get("pr_urls", []) if url])
+            summary["merge_commits"].extend(fallback_result.get("merge_commits", []))
+            summary["material_changes_detected"] = summary["material_changes_detected"] or fallback_result.get("material_changes_detected", False)
+            summary["upstream_batches"][-1]["fallback_used"] = True
+            summary["upstream_batches"][-1]["fallback_commits_processed"] = fallback_result.get("fallback_commits_processed", 0)
+            summary["upstream_batches"][-1]["fallback_commits_merged"] = fallback_result.get("fallback_commits_merged", 0)
+
+            if fallback_result.get("fallback_blocked_commit"):
+                summary["batches_blocked"] += 1
+                summary["blocked_batch_reason"] = fallback_result.get("fallback_blocked_reason") or "batch-processing-blocked"
+                summary["blocked_batch_commits"] = [fallback_result["fallback_blocked_commit"]]
+                summary["blocked_batch_files"] = fallback_result.get("fallback_blocked_files") or []
+                summary["fallback_blocked_commit"] = fallback_result.get("fallback_blocked_commit")
+                summary["fallback_blocked_files"] = fallback_result.get("fallback_blocked_files") or []
+                summary["fallback_blocked_reason"] = fallback_result.get("fallback_blocked_reason")
+                summary["final_status"] = "blocked"
+                summary["run_status"] = "blocked"
+                summary["integration_status"] = "blocked-batch-risk"
+                summary["integration_risk_level"] = fallback_result.get("risk") or batch_risk
+                summary["integration_blockers"] = [summary["blocked_batch_reason"]] if summary["blocked_batch_reason"] else ["batch-upstream-high-risk"]
+                summary["next_step"] = f"Batch {batch['index']} split into commits and blocked on {fallback_result['fallback_blocked_commit']}."
+                break
+
+            if fallback_result.get("fallback_commits_merged"):
+                summary["batches_merged"] += fallback_result.get("fallback_commits_merged", 0)
+                summary["tests_run"] = fallback_result.get("tests_run") or summary["tests_run"]
+                summary["final_validation"] = fallback_result.get("final_validation") or summary["final_validation"]
+                summary["next_step"] = f"Batch {batch['index']} split into individual commits and processed successfully."
+                continue
+
+            summary["next_step"] = f"Batch {batch['index']} split into individual commits; no auto-merge was performed."
+            summary["final_status"] = "pr-created"
+            summary["run_status"] = "needs-integration"
+            summary["integration_status"] = "batched-upstream"
+            summary["integration_risk_level"] = "low"
+            summary["integration_blockers"] = []
+            continue
 
         if batch_risk != "low":
             summary["batches_blocked"] += 1
@@ -1117,6 +1316,12 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  batches processed: {report.get('batches_processed')}")
         lines.append(f"  batches merged: {report.get('batches_merged')}")
         lines.append(f"  batches blocked: {report.get('batches_blocked')}")
+        lines.append(f"  batch fallback used: {bool(report.get('batch_fallback_used'))}")
+        lines.append(f"  fallback from batch size: {report.get('fallback_from_batch_size') or '<none>'}")
+        lines.append(f"  fallback commits processed: {report.get('fallback_commits_processed')}")
+        lines.append(f"  fallback commits merged: {report.get('fallback_commits_merged')}")
+        lines.append(f"  fallback blocked reason: {report.get('fallback_blocked_reason') or '<none>'}")
+        lines.append(f"  fallback blocked commit: {report.get('fallback_blocked_commit') or '<none>'}")
         lines.append(f"  blocked batch reason: {report.get('blocked_batch_reason') or '<none>'}")
         lines.append(f"  blocked batch commits: {len(report.get('blocked_batch_commits') or [])}")
         lines.append(f"  blocked batch files: {len(report.get('blocked_batch_files') or [])}")
