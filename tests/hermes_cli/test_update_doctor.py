@@ -262,6 +262,8 @@ def test_run_mode_needs_integration_after_skip_safe_and_preserves_working_tree(m
     report_before = _git_status()
     report = _sample_report(replay_result="passed", conflict=None)
     report["replay"]["replay_continued_after_skip"] = True
+    report["environment"]["behind"] = 19
+    report["environment"]["origin_ahead_count"] = 19
     monkeypatch.setattr("hermes_cli.update_doctor.build_report", lambda **kwargs: report)
 
     exit_code = doctor_main(["--run", "--format", "json"])
@@ -282,12 +284,12 @@ def test_run_mode_needs_integration_after_skip_safe_and_preserves_working_tree(m
     assert rendered["pr_status"] == "no-pr-needed"
     assert rendered["merge_status"] == "not-needed"
     assert rendered["branch_name"] == "main"
-    assert rendered["next_step"] == "Sandbox replay continued after safe skips, but origin/main is still 99 commits ahead; no integration was applied."
+    assert rendered["next_step"] == "Sandbox replay continued after safe skips, but origin/main is still 19 commits ahead; no integration was applied."
     assert rendered["tests_run"] == []
     assert rendered["pr_url"] is None
     assert rendered["merge_commit"] is None
     assert rendered["final_validation"]["status"] == "not-needed"
-    assert rendered["origin_ahead_count"] == 99
+    assert rendered["origin_ahead_count"] == 19
     assert rendered["skipped_safe_commits"]
     assert rendered["replay_continued_after_skip"] is True
     assert rendered["integration_status"] == "needs-integration"
@@ -335,10 +337,15 @@ def test_pr_and_auto_merge_noop_path_does_not_create_pr(monkeypatch, capsys) -> 
 
     assert exit_code == 1
     rendered = json.loads(out)
-    assert rendered["run_status"] == "needs-integration"
-    assert rendered["pr_status"] == "no-pr-needed"
+    assert rendered["run_status"] == "blocked"
+    assert rendered["result"] == "blocked"
+    assert rendered["integration_status"] == "blocked-high-risk"
+    assert rendered["integration_risk_level"] == "high"
+    assert rendered["integration_blockers"] == ["broad-upstream-sync"]
+    assert rendered["pr_status"] == "not-created-risk"
     assert rendered["merge_status"] == "not-needed"
     assert rendered["pr_url"] is None
+    assert rendered["origin_ahead_count"] == 99
 
 
 def test_classify_pr_risk_handles_low_and_high_paths() -> None:
@@ -383,6 +390,8 @@ def test_classify_pr_risk_handles_low_and_high_paths() -> None:
 
 def test_publish_artifacts_merges_low_risk_pr(monkeypatch) -> None:
     report = _sample_report()
+    report["environment"]["behind"] = 19
+    report["environment"]["origin_ahead_count"] = 19
     report["repair"] = {
         "mode": "repair",
         "result": "changed",
