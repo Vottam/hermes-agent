@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -933,7 +934,14 @@ def _fallback_batch_to_individual_commits(
         "medium_blocked_files": [],
         "medium_blocked_reasons": [],
         "medium_suggested_tests": [],
+        "medium_tests_run": [],
+        "medium_tests_passed": [],
+        "medium_test_failures": [],
+        "medium_tested_status": "not-run",
+        "medium_pr_eligible": False,
         "medium_reclassification_candidate": False,
+        "pr_status": "not-requested",
+        "merge_status": "not-needed",
         "pr_urls": [],
         "merge_commits": [],
         "published": [],
@@ -948,87 +956,164 @@ def _fallback_batch_to_individual_commits(
 
         if single_risk != "low":
             medium_triage: dict[str, Any] = {}
+            medium_test_result: dict[str, Any] = {
+                "status": "failed",
+                "tests_run": [],
+                "tests_passed": [],
+                "test_failures": [],
+            }
             if single_risk == "medium":
                 medium_triage = _triage_medium_commit(root, commit, files=single_files, subject=_commit_subject(root, commit))
+                medium_test_result = _run_medium_commit_sandbox_tests(root, commit, medium_triage["suggested_tests"])
             fallback.update(
                 {
-                    "status": "blocked",
-                    "reason": f"batch-risk:{single_risk}",
-                    "risk": single_risk,
-                    "fallback_blocked_commit": commit,
-                    "fallback_blocked_files": single_files,
-                    "fallback_blocked_reason": f"batch-risk:{single_risk}",
+                    "medium_triage_used": bool(medium_triage),
+                    "medium_blocked_commit": medium_triage.get("commit") if medium_triage else commit,
+                    "medium_blocked_subject": medium_triage.get("subject") if medium_triage else None,
+                    "medium_blocked_files": medium_triage.get("files") if medium_triage else single_files,
+                    "medium_blocked_reasons": medium_triage.get("reasons") if medium_triage else [f"batch-risk:{single_risk}"],
+                    "medium_suggested_tests": medium_triage.get("suggested_tests") if medium_triage else [],
+                    "medium_tests_run": medium_test_result.get("tests_run", []),
+                    "medium_tests_passed": medium_test_result.get("tests_passed", []),
+                    "medium_test_failures": medium_test_result.get("test_failures", []),
+                    "medium_tested_status": medium_test_result.get("status", "failed"),
+                    "medium_pr_eligible": medium_test_result.get("status") == "passed",
+                    "medium_reclassification_candidate": medium_triage.get("reclassification_candidate", False),
                 }
             )
-            if medium_triage:
+            if medium_triage and medium_test_result.get("status") == "passed":
                 fallback.update(
                     {
-                        "medium_triage_used": True,
-                        "medium_blocked_commit": medium_triage["commit"],
-                        "medium_blocked_subject": medium_triage["subject"],
-                        "medium_blocked_files": medium_triage["files"],
-                        "medium_blocked_reasons": medium_triage["reasons"],
-                        "medium_suggested_tests": medium_triage["suggested_tests"],
-                        "medium_reclassification_candidate": medium_triage["reclassification_candidate"],
+                        "pr_status": "available-not-created" if not request_pr else "created",
+                        "merge_status": "not-needed" if not request_pr else "not-eligible",
+                        "status": "medium-tested" if not request_pr else "pr-created",
+                        "reason": None if request_pr else "medium tests passed in sandbox; PR eligible but not created.",
                     }
                 )
-            return fallback
-
-        if not request_pr:
-            continue
-
-        single_batch = {
-            "index": f"{batch['index']}.{offset}",
-            "size": 1,
-            "commits": [commit],
-            "first_commit": commit,
-            "last_commit": commit,
-        }
-        single_result = _process_upstream_batch(
-            report,
-            root=root,
-            batch=single_batch,
-            request_pr=True,
-            request_auto_merge_low_risk=request_auto_merge_low_risk,
-            refresh_after_merge=False,
-        )
-        fallback["pr_urls"].append(single_result.get("pr_url"))
-
-        if single_result.get("status") == "blocked":
-            fallback.update(
-                {
-                    "status": "blocked",
-                    "reason": single_result.get("reason") or "batch-processing-blocked",
-                    "risk": single_result.get("risk") or single_risk,
-                    "fallback_blocked_commit": commit,
-                    "fallback_blocked_files": single_result.get("files") or single_files,
-                    "fallback_blocked_reason": single_result.get("reason") or "batch-processing-blocked",
+                if not request_pr:
+                    return fallback
+                single_batch = {
+                    "index": f"{batch['index']}.{offset}",
+                    "size": 1,
+                    "commits": [commit],
+                    "first_commit": commit,
+                    "last_commit": commit,
                 }
-            )
-            return fallback
+                single_result = _process_upstream_batch(
+                    report,
+                    root=root,
+                    batch=single_batch,
+                    request_pr=True,
+                    request_auto_merge_low_risk=request_auto_merge_low_risk,
+                    refresh_after_merge=False,
+                )
+                fallback["pr_urls"].append(single_result.get("pr_url"))
+                if single_result.get("status") == "blocked":
+                    fallback.update(
+                        {
+                            "status": "blocked",
+                            "reason": single_result.get("reason") or "batch-processing-blocked",
+                            "risk": single_result.get("risk") or single_risk,
+                            "fallback_blocked_commit": commit,
+                            "fallback_blocked_files": single_result.get("files") or single_files,
+                            "fallback_blocked_reason": single_result.get("reason") or "batch-processing-blocked",
+                        }
+                    )
+                    return fallback
 
-        published = single_result.get("published") or {}
-        if published.get("merge_status") == "blocked":
-            fallback.update(
-                {
-                    "status": "blocked",
-                    "reason": published.get("next_step") or "batch-auto-merge-blocked",
-                    "risk": single_risk,
-                    "fallback_blocked_commit": commit,
-                    "fallback_blocked_files": single_files,
-                    "fallback_blocked_reason": published.get("next_step") or "batch-auto-merge-blocked",
-                }
-            )
-            return fallback
+                published = single_result.get("published") or {}
+                if published.get("merge_status") == "blocked":
+                    fallback.update(
+                        {
+                            "status": "blocked",
+                            "reason": published.get("next_step") or "batch-auto-merge-blocked",
+                            "risk": single_risk,
+                            "fallback_blocked_commit": commit,
+                            "fallback_blocked_files": single_files,
+                            "fallback_blocked_reason": published.get("next_step") or "batch-auto-merge-blocked",
+                        }
+                    )
+                    return fallback
 
-        if single_result.get("merge_commit"):
-            fallback["fallback_commits_merged"] += 1
-            fallback["merge_commits"].append(single_result["merge_commit"])
-            fallback["tests_run"] = published.get("tests_run") or fallback["tests_run"]
-            fallback["final_validation"] = published.get("final_validation") or fallback["final_validation"]
+                if single_result.get("merge_commit"):
+                    fallback["fallback_commits_merged"] += 1
+                    fallback["merge_commits"].append(single_result["merge_commit"])
+                    fallback["tests_run"] = published.get("tests_run") or fallback["tests_run"]
+                    fallback["final_validation"] = published.get("final_validation") or fallback["final_validation"]
+                else:
+                    fallback["status"] = "pr-created"
+                    fallback["reason"] = published.get("next_step") or single_result.get("reason")
+                continue
+            else:
+                fallback.update(
+                    {
+                        "status": "blocked",
+                        "reason": f"batch-risk:{single_risk}" if single_risk != "medium" else "medium-tests-failed",
+                        "risk": single_risk,
+                        "fallback_blocked_commit": commit,
+                        "fallback_blocked_files": single_files,
+                        "fallback_blocked_reason": f"batch-risk:{single_risk}" if single_risk != "medium" else "medium-tests-failed",
+                        "pr_status": "not-created-risk",
+                    }
+                )
+                return fallback
         else:
-            fallback["status"] = "pr-created"
-            fallback["reason"] = published.get("next_step") or single_result.get("reason")
+            if not request_pr:
+                continue
+
+            single_batch = {
+                "index": f"{batch['index']}.{offset}",
+                "size": 1,
+                "commits": [commit],
+                "first_commit": commit,
+                "last_commit": commit,
+            }
+            single_result = _process_upstream_batch(
+                report,
+                root=root,
+                batch=single_batch,
+                request_pr=True,
+                request_auto_merge_low_risk=request_auto_merge_low_risk,
+                refresh_after_merge=False,
+            )
+            fallback["pr_urls"].append(single_result.get("pr_url"))
+
+            if single_result.get("status") == "blocked":
+                fallback.update(
+                    {
+                        "status": "blocked",
+                        "reason": single_result.get("reason") or "batch-processing-blocked",
+                        "risk": single_result.get("risk") or single_risk,
+                        "fallback_blocked_commit": commit,
+                        "fallback_blocked_files": single_result.get("files") or single_files,
+                        "fallback_blocked_reason": single_result.get("reason") or "batch-processing-blocked",
+                    }
+                )
+                return fallback
+
+            published = single_result.get("published") or {}
+            if published.get("merge_status") == "blocked":
+                fallback.update(
+                    {
+                        "status": "blocked",
+                        "reason": published.get("next_step") or "batch-auto-merge-blocked",
+                        "risk": single_risk,
+                        "fallback_blocked_commit": commit,
+                        "fallback_blocked_files": single_files,
+                        "fallback_blocked_reason": published.get("next_step") or "batch-auto-merge-blocked",
+                    }
+                )
+                return fallback
+
+            if single_result.get("merge_commit"):
+                fallback["fallback_commits_merged"] += 1
+                fallback["merge_commits"].append(single_result["merge_commit"])
+                fallback["tests_run"] = published.get("tests_run") or fallback["tests_run"]
+                fallback["final_validation"] = published.get("final_validation") or fallback["final_validation"]
+            else:
+                fallback["status"] = "pr-created"
+                fallback["reason"] = published.get("next_step") or single_result.get("reason")
+            continue
 
     if fallback["fallback_commits_processed"] and fallback["fallback_commits_merged"] == fallback["fallback_commits_processed"]:
         fallback["status"] = "completed"
@@ -1081,6 +1166,81 @@ def _triage_medium_commit(
     }
 
 
+def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: Sequence[str]) -> dict[str, Any]:
+    worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-medium-", dir="/tmp"))
+    worktree_path = worktree_parent / "worktree"
+    branch_name = f"update-doctor-medium-tested-{commit[:8]}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    tests_run: list[str] = []
+    tests_passed: list[str] = []
+    test_failures: list[str] = []
+    python_bin = root / "venv" / "bin" / "python"
+
+    def _run_test_command(command: str) -> subprocess.CompletedProcess[str]:
+        if command.startswith("pytest "):
+            return subprocess.run(
+                [str(python_bin), "-m", "pytest", *shlex.split(command)[1:]],
+                cwd=str(worktree_path),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if command.startswith("cd ") or "&&" in command:
+            return subprocess.run(
+                ["bash", "-lc", command],
+                cwd=str(worktree_path),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        return subprocess.run(
+            shlex.split(command),
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    try:
+        _run_git(["worktree", "add", "--detach", str(worktree_path), "fork/main"], cwd=root)
+        _run_git(["switch", "-c", branch_name], cwd=worktree_path)
+        cherry = _run_git(["cherry-pick", "--no-edit", commit], cwd=worktree_path, check=False)
+        if cherry.returncode != 0:
+            test_failures.append(f"cherry-pick {commit} failed")
+            return {
+                "status": "failed",
+                "tests_run": tests_run,
+                "tests_passed": tests_passed,
+                "test_failures": test_failures,
+                "branch_name": branch_name,
+            }
+
+        for command in suggested_tests:
+            tests_run.append(command)
+            result = _run_test_command(command)
+            if result.returncode != 0:
+                test_failures.append(f"{command} (exit {result.returncode})")
+                return {
+                    "status": "failed",
+                    "tests_run": tests_run,
+                    "tests_passed": tests_passed,
+                    "test_failures": test_failures,
+                    "branch_name": branch_name,
+                }
+            tests_passed.append(command)
+
+        return {
+            "status": "passed",
+            "tests_run": tests_run,
+            "tests_passed": tests_passed,
+            "test_failures": test_failures,
+            "branch_name": branch_name,
+        }
+    finally:
+        _run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=root, check=False)
+        if worktree_parent.is_dir() and str(worktree_parent).startswith("/tmp/hermes-"):
+            shutil.rmtree(worktree_parent, ignore_errors=True)
+
+
 def _batch_upstream_run(
     report: dict[str, Any],
     *,
@@ -1117,6 +1277,11 @@ def _batch_upstream_run(
         "medium_blocked_reasons": [],
         "medium_suggested_tests": [],
         "medium_reclassification_candidate": False,
+        "medium_tests_run": [],
+        "medium_tests_passed": [],
+        "medium_test_failures": [],
+        "medium_tested_status": "not-run",
+        "medium_pr_eligible": False,
         "final_status": "completed" if not batches else "planned",
         "integration_status": "batched-upstream",
         "integration_risk_level": "low",
@@ -1166,6 +1331,20 @@ def _batch_upstream_run(
             summary["upstream_batches"][-1]["fallback_used"] = True
             summary["upstream_batches"][-1]["fallback_commits_processed"] = fallback_result.get("fallback_commits_processed", 0)
             summary["upstream_batches"][-1]["fallback_commits_merged"] = fallback_result.get("fallback_commits_merged", 0)
+            summary["medium_triage_used"] = fallback_result.get("medium_triage_used", False)
+            summary["medium_blocked_commit"] = fallback_result.get("medium_blocked_commit")
+            summary["medium_blocked_subject"] = fallback_result.get("medium_blocked_subject")
+            summary["medium_blocked_files"] = fallback_result.get("medium_blocked_files") or []
+            summary["medium_blocked_reasons"] = fallback_result.get("medium_blocked_reasons") or []
+            summary["medium_suggested_tests"] = fallback_result.get("medium_suggested_tests") or []
+            summary["medium_reclassification_candidate"] = fallback_result.get("medium_reclassification_candidate", False)
+            summary["medium_tests_run"] = fallback_result.get("medium_tests_run") or []
+            summary["medium_tests_passed"] = fallback_result.get("medium_tests_passed") or []
+            summary["medium_test_failures"] = fallback_result.get("medium_test_failures") or []
+            summary["medium_tested_status"] = fallback_result.get("medium_tested_status") or "not-run"
+            summary["medium_pr_eligible"] = fallback_result.get("medium_pr_eligible", False)
+            summary["pr_status"] = fallback_result.get("pr_status", summary["pr_status"])
+            summary["merge_status"] = fallback_result.get("merge_status", summary["merge_status"])
 
             if fallback_result.get("fallback_blocked_commit"):
                 summary["batches_blocked"] += 1
@@ -1175,13 +1354,6 @@ def _batch_upstream_run(
                 summary["fallback_blocked_commit"] = fallback_result.get("fallback_blocked_commit")
                 summary["fallback_blocked_files"] = fallback_result.get("fallback_blocked_files") or []
                 summary["fallback_blocked_reason"] = fallback_result.get("fallback_blocked_reason")
-                summary["medium_triage_used"] = fallback_result.get("medium_triage_used", False)
-                summary["medium_blocked_commit"] = fallback_result.get("medium_blocked_commit")
-                summary["medium_blocked_subject"] = fallback_result.get("medium_blocked_subject")
-                summary["medium_blocked_files"] = fallback_result.get("medium_blocked_files") or []
-                summary["medium_blocked_reasons"] = fallback_result.get("medium_blocked_reasons") or []
-                summary["medium_suggested_tests"] = fallback_result.get("medium_suggested_tests") or []
-                summary["medium_reclassification_candidate"] = fallback_result.get("medium_reclassification_candidate", False)
                 summary["final_status"] = "blocked"
                 summary["run_status"] = "blocked"
                 summary["integration_status"] = "blocked-batch-risk"
@@ -1190,6 +1362,15 @@ def _batch_upstream_run(
                 summary["next_step"] = f"Batch {batch['index']} split into commits and blocked on {fallback_result['fallback_blocked_commit']}."
                 break
 
+            if fallback_result.get("medium_tested_status") == "passed" and not fallback_result.get("pr_urls"):
+                summary["final_status"] = "medium-tested"
+                summary["run_status"] = "needs-integration"
+                summary["integration_status"] = "batched-upstream"
+                summary["integration_risk_level"] = fallback_result.get("risk") or batch_risk
+                summary["integration_blockers"] = []
+                summary["next_step"] = fallback_result.get("reason") or f"Batch {batch['index']} medium commit passed sandbox tests; PR eligible but not created."
+                continue
+
             if fallback_result.get("fallback_commits_merged"):
                 summary["batches_merged"] += fallback_result.get("fallback_commits_merged", 0)
                 summary["tests_run"] = fallback_result.get("tests_run") or summary["tests_run"]
@@ -1197,11 +1378,11 @@ def _batch_upstream_run(
                 summary["next_step"] = f"Batch {batch['index']} split into individual commits and processed successfully."
                 continue
 
-            summary["next_step"] = f"Batch {batch['index']} split into individual commits; no auto-merge was performed."
-            summary["final_status"] = "pr-created"
+            summary["next_step"] = fallback_result.get("reason") or f"Batch {batch['index']} split into individual commits; no auto-merge was performed."
+            summary["final_status"] = fallback_result.get("status") or "pr-created"
             summary["run_status"] = "needs-integration"
             summary["integration_status"] = "batched-upstream"
-            summary["integration_risk_level"] = "low"
+            summary["integration_risk_level"] = fallback_result.get("risk") or "low"
             summary["integration_blockers"] = []
             continue
 
