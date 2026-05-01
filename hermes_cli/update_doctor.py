@@ -937,6 +937,9 @@ def _fallback_batch_to_individual_commits(
         "medium_tests_run": [],
         "medium_tests_passed": [],
         "medium_test_failures": [],
+        "medium_baseline_tests_run": [],
+        "medium_baseline_failures": [],
+        "medium_baseline_failure_matched": False,
         "medium_tested_status": "not-run",
         "medium_pr_eligible": False,
         "medium_sandbox_prepared": False,
@@ -978,26 +981,38 @@ def _fallback_batch_to_individual_commits(
                     "medium_tests_run": medium_test_result.get("tests_run", []),
                     "medium_tests_passed": medium_test_result.get("tests_passed", []),
                     "medium_test_failures": medium_test_result.get("test_failures", []),
+                    "medium_baseline_tests_run": medium_test_result.get("medium_baseline_tests_run", []),
+                    "medium_baseline_failures": medium_test_result.get("medium_baseline_failures", []),
+                    "medium_baseline_failure_matched": medium_test_result.get("medium_baseline_failure_matched", False),
                     "medium_tested_status": medium_test_result.get("status", "failed"),
-                    "medium_pr_eligible": medium_test_result.get("status") == "passed",
+                    "medium_pr_eligible": medium_test_result.get("status") in {"passed", "baseline-failure"},
                     "medium_reclassification_candidate": medium_triage.get("reclassification_candidate", False),
                     "medium_sandbox_prepared": medium_test_result.get("medium_sandbox_prepared", False),
                     "medium_sandbox_preparation": medium_test_result.get("medium_sandbox_preparation", []),
                 }
             )
-            if medium_triage and medium_test_result.get("status") == "passed":
+            if medium_triage and medium_test_result.get("status") in {"passed", "baseline-failure"}:
+                baseline_matched = medium_test_result.get("status") == "baseline-failure"
                 fallback.update(
                     {
                         "pr_status": "available-not-created" if not request_pr else "created",
                         "merge_status": "not-needed" if not request_pr else "not-eligible",
                         "status": "medium-tested" if not request_pr else "pr-created",
-                        "reason": None if request_pr else "medium tests passed in sandbox; PR eligible but not created.",
+                        "reason": (
+                            None
+                            if request_pr
+                            else (
+                                "medium tests matched a baseline failure in sandbox; PR eligible but not created."
+                                if baseline_matched
+                                else "medium tests passed in sandbox; PR eligible but not created."
+                            )
+                        ),
                     }
                 )
                 if not request_pr:
                     return fallback
                 single_batch = {
-                    "index": f"{batch['index']}.{offset}",
+                    "index": int(batch["index"]) * 10 + offset,
                     "size": 1,
                     "commits": [commit],
                     "first_commit": commit,
@@ -1208,6 +1223,19 @@ def _prepare_medium_web_sandbox(root: Path, worktree_path: Path) -> dict[str, An
     return {"prepared": True, "preparation": ["linked web/node_modules"], "failure": None}
 
 
+def _medium_failure_signature(command: str, result: subprocess.CompletedProcess[str]) -> str:
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    if command.startswith("pytest "):
+        summary_lines = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED ", "ERROR "))]
+        if summary_lines:
+            return "\n".join(summary_lines)
+        assertion_lines = [line.strip() for line in output.splitlines() if "AssertionError:" in line]
+        if assertion_lines:
+            return assertion_lines[-1]
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
 def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: Sequence[str]) -> dict[str, Any]:
     worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-medium-", dir="/tmp"))
     worktree_path = worktree_parent / "worktree"
@@ -1215,15 +1243,18 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
     tests_run: list[str] = []
     tests_passed: list[str] = []
     test_failures: list[str] = []
+    baseline_tests_run: list[str] = []
+    baseline_failures: list[str] = []
+    baseline_failure_matched = False
     sandbox_prepared = False
     sandbox_preparation: list[str] = []
     python_bin = root / "venv" / "bin" / "python"
 
-    def _run_test_command(command: str) -> subprocess.CompletedProcess[str]:
+    def _run_test_command(command: str, *, cwd: Path) -> subprocess.CompletedProcess[str]:
         if command.startswith("pytest "):
             return subprocess.run(
                 [str(python_bin), "-m", "pytest", *shlex.split(command)[1:]],
-                cwd=str(worktree_path),
+                cwd=str(cwd),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1231,14 +1262,14 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
         if command.startswith("cd ") or "&&" in command:
             return subprocess.run(
                 ["bash", "-lc", command],
-                cwd=str(worktree_path),
+                cwd=str(cwd),
                 capture_output=True,
                 text=True,
                 check=False,
             )
         return subprocess.run(
             shlex.split(command),
-            cwd=str(worktree_path),
+            cwd=str(cwd),
             capture_output=True,
             text=True,
             check=False,
@@ -1255,6 +1286,9 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
                 "tests_run": tests_run,
                 "tests_passed": tests_passed,
                 "test_failures": test_failures,
+                "medium_baseline_tests_run": baseline_tests_run,
+                "medium_baseline_failures": baseline_failures,
+                "medium_baseline_failure_matched": baseline_failure_matched,
                 "medium_sandbox_prepared": sandbox_prepared,
                 "medium_sandbox_preparation": sandbox_preparation,
                 "branch_name": branch_name,
@@ -1273,18 +1307,30 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
                         "tests_run": tests_run,
                         "tests_passed": tests_passed,
                         "test_failures": test_failures,
+                        "medium_baseline_tests_run": baseline_tests_run,
+                        "medium_baseline_failures": baseline_failures,
+                        "medium_baseline_failure_matched": baseline_failure_matched,
                         "medium_sandbox_prepared": sandbox_prepared,
                         "medium_sandbox_preparation": sandbox_preparation,
                         "branch_name": branch_name,
                     }
-            result = _run_test_command(command)
+            result = _run_test_command(command, cwd=worktree_path)
             if result.returncode != 0:
                 test_failures.append(f"{command} (exit {result.returncode})")
+                baseline_tests_run.append(command)
+                baseline_result = _run_test_command(command, cwd=root)
+                if baseline_result.returncode != 0:
+                    baseline_failures.append(f"{command} (exit {baseline_result.returncode})")
+                    baseline_failure_matched = _medium_failure_signature(command, result) == _medium_failure_signature(command, baseline_result)
+                status = "baseline-failure" if baseline_failure_matched else "failed"
                 return {
-                    "status": "failed",
+                    "status": status,
                     "tests_run": tests_run,
                     "tests_passed": tests_passed,
                     "test_failures": test_failures,
+                    "medium_baseline_tests_run": baseline_tests_run,
+                    "medium_baseline_failures": baseline_failures,
+                    "medium_baseline_failure_matched": baseline_failure_matched,
                     "medium_sandbox_prepared": sandbox_prepared,
                     "medium_sandbox_preparation": sandbox_preparation,
                     "branch_name": branch_name,
@@ -1296,6 +1342,9 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
             "tests_run": tests_run,
             "tests_passed": tests_passed,
             "test_failures": test_failures,
+            "medium_baseline_tests_run": baseline_tests_run,
+            "medium_baseline_failures": baseline_failures,
+            "medium_baseline_failure_matched": baseline_failure_matched,
             "medium_sandbox_prepared": sandbox_prepared,
             "medium_sandbox_preparation": sandbox_preparation,
             "branch_name": branch_name,
@@ -1345,6 +1394,9 @@ def _batch_upstream_run(
         "medium_tests_run": [],
         "medium_tests_passed": [],
         "medium_test_failures": [],
+        "medium_baseline_tests_run": [],
+        "medium_baseline_failures": [],
+        "medium_baseline_failure_matched": False,
         "medium_tested_status": "not-run",
         "medium_pr_eligible": False,
         "medium_sandbox_prepared": False,
@@ -1408,6 +1460,9 @@ def _batch_upstream_run(
             summary["medium_tests_run"] = fallback_result.get("medium_tests_run") or []
             summary["medium_tests_passed"] = fallback_result.get("medium_tests_passed") or []
             summary["medium_test_failures"] = fallback_result.get("medium_test_failures") or []
+            summary["medium_baseline_tests_run"] = fallback_result.get("medium_baseline_tests_run") or []
+            summary["medium_baseline_failures"] = fallback_result.get("medium_baseline_failures") or []
+            summary["medium_baseline_failure_matched"] = fallback_result.get("medium_baseline_failure_matched", False)
             summary["medium_tested_status"] = fallback_result.get("medium_tested_status") or "not-run"
             summary["medium_pr_eligible"] = fallback_result.get("medium_pr_eligible", False)
             summary["medium_sandbox_prepared"] = fallback_result.get("medium_sandbox_prepared", False)
@@ -1431,7 +1486,7 @@ def _batch_upstream_run(
                 summary["next_step"] = f"Batch {batch['index']} split into commits and blocked on {fallback_result['fallback_blocked_commit']}."
                 break
 
-            if fallback_result.get("medium_tested_status") == "passed" and not fallback_result.get("pr_urls"):
+            if fallback_result.get("medium_tested_status") in {"passed", "baseline-failure"} and not fallback_result.get("pr_urls"):
                 summary["final_status"] = "medium-tested"
                 summary["run_status"] = "needs-integration"
                 summary["integration_status"] = "batched-upstream"
