@@ -15,6 +15,7 @@ from hermes_cli.update_doctor import (
     _batch_upstream_run,
     _classify_pr_risk,
     _classify_upstream_batch_risk,
+    _fallback_batch_to_individual_commits,
     _plan_upstream_batches,
     _publish_run_artifacts,
 )
@@ -460,55 +461,115 @@ def test_classify_upstream_batch_risk_low_medium_high(monkeypatch) -> None:
     assert _classify_upstream_batch_risk(REPO_ROOT, ["mixed"]) == "high"
 
 
-def test_batch_upstream_run_stops_on_first_high_risk_batch(monkeypatch) -> None:
+def test_batch_upstream_run_falls_back_to_individual_commits(monkeypatch) -> None:
     report = _sample_report(replay_result="passed", conflict=None)
     report["environment"]["behind"] = 147
     report["environment"]["origin_ahead_count"] = 147
 
     batches = [
-        {"index": 1, "size": 5, "commits": ["c1", "c2", "c3", "c4", "c5"], "first_commit": "c1", "last_commit": "c5"},
-        {"index": 2, "size": 5, "commits": ["c6", "c7", "c8", "c9", "c10"], "first_commit": "c6", "last_commit": "c10"},
-        {"index": 3, "size": 5, "commits": ["c11", "c12", "c13", "c14", "c15"], "first_commit": "c11", "last_commit": "c15"},
+        {"index": 1, "size": 5, "commits": ["docs-1", "docs-2", "runtime", "docs-4", "docs-5"], "first_commit": "docs-1", "last_commit": "docs-5"},
+        {"index": 2, "size": 5, "commits": ["later-1", "later-2", "later-3", "later-4", "later-5"], "first_commit": "later-1", "last_commit": "later-5"},
     ]
-    risk_map = {"c1": "low", "c2": "low", "c3": "low", "c4": "low", "c5": "low", "c6": "high", "c7": "high"}
+    risk_map = {
+        ("docs-1", "docs-2", "runtime", "docs-4", "docs-5"): "high",
+        ("docs-1",): "low",
+        ("docs-2",): "low",
+        ("runtime",): "high",
+        ("docs-4",): "low",
+        ("docs-5",): "low",
+    }
+    file_map = {
+        ("docs-1",): ["docs/notes.md"],
+        ("docs-2",): ["docs/plans/2026-04-30-hermes-update-doctor.md"],
+        ("runtime",): ["hermes_cli/main.py"],
+        ("docs-4",): ["docs/notes.md"],
+        ("docs-5",): ["docs/notes.md"],
+        ("docs-1", "docs-2", "runtime", "docs-4", "docs-5"): ["docs/notes.md", "hermes_cli/main.py"],
+        ("later-1", "later-2", "later-3", "later-4", "later-5"): ["docs/notes.md"],
+    }
+    process_calls: list[tuple[str, ...]] = []
+
     monkeypatch.setattr("hermes_cli.update_doctor._plan_upstream_batches", lambda *args, **kwargs: batches)
-    monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[args[1][0]])
-    monkeypatch.setattr(
-        "hermes_cli.update_doctor._batch_changed_files",
-        lambda *args, **kwargs: ["docs/notes.md"] if args[1][0] == "c1" else ["hermes_cli/main.py"],
-    )
-    refresh_calls: list[list[str]] = []
-    monkeypatch.setattr(
-        "hermes_cli.update_doctor._process_upstream_batch",
-        lambda *args, **kwargs: {
+    monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[tuple(args[1])])
+    monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", lambda *args, **kwargs: file_map[tuple(args[1])])
+    monkeypatch.setattr("hermes_cli.update_doctor._refresh_main_and_validate", lambda *args, **kwargs: ["pytest", "doctor", "version"])
+
+    def fake_process(report, *, root, batch, request_pr, request_auto_merge_low_risk, refresh_after_merge=False):
+        commits = tuple(batch["commits"])
+        process_calls.append(commits)
+        if commits == ("runtime",):
+            raise AssertionError("high-risk runtime commit must not be auto-merged")
+        return {
             "status": "merged",
             "reason": None,
             "risk": "low",
-            "commits": batches[0]["commits"],
-            "files": ["docs/notes.md"],
-            "branch_name": "update-doctor-batch-upstream-01",
-            "pr_url": "https://github.com/Vottam/hermes-agent/pull/101",
-            "merge_commit": "merge-1",
-            "published": {"tests_run": ["pytest"], "final_validation": {"status": "passed", "checks": ["pytest"]}},
-        },
-    )
-    monkeypatch.setattr("hermes_cli.update_doctor._refresh_main_and_validate", lambda *args, **kwargs: refresh_calls.append(["pytest", "doctor", "version"]) or ["pytest", "doctor", "version"])
+            "commits": list(commits),
+            "files": file_map[commits],
+            "branch_name": f"update-doctor-batch-upstream-{batch['index']}",
+            "pr_url": f"https://github.com/Vottam/hermes-agent/pull/{100 + len(process_calls)}",
+            "merge_commit": f"merge-{commits[0]}",
+            "published": {
+                "tests_run": ["pytest"],
+                "final_validation": {"status": "passed", "checks": ["pytest"]},
+                "merge_status": "merged",
+            },
+        }
+
+    monkeypatch.setattr("hermes_cli.update_doctor._process_upstream_batch", fake_process)
 
     summary = _batch_upstream_run(report, root=REPO_ROOT, request_pr=True, request_auto_merge_low_risk=True, batch_size=5)
 
-    assert summary["batches_total"] == 3
-    assert summary["batches_processed"] == 2
-    assert summary["batches_merged"] == 1
+    assert summary["batch_fallback_used"] is True
+    assert summary["fallback_from_batch_size"] == 5
+    assert summary["fallback_commits_processed"] == 3
+    assert summary["fallback_commits_merged"] == 2
+    assert summary["fallback_blocked_commit"] == "runtime"
+    assert summary["fallback_blocked_files"] == ["hermes_cli/main.py"]
+    assert summary["fallback_blocked_reason"] == "batch-risk:high"
+    assert summary["batches_total"] == 2
+    assert summary["batches_processed"] == 1
     assert summary["batches_blocked"] == 1
     assert summary["blocked_batch_reason"] == "batch-risk:high"
-    assert summary["blocked_batch_commits"] == batches[1]["commits"]
-    assert summary["pr_urls"] == ["https://github.com/Vottam/hermes-agent/pull/101"]
-    assert summary["merge_commits"] == ["merge-1"]
-    assert summary["final_status"] == "blocked"
+    assert summary["blocked_batch_commits"] == ["runtime"]
     assert summary["run_status"] == "blocked"
-    assert refresh_calls == [["pytest", "doctor", "version"]]
+    assert summary["integration_status"] == "blocked-batch-risk"
+    assert process_calls == [("docs-1",), ("docs-2",)]
 
 
+def test_fallback_batch_to_individual_commits_blocks_on_runtime(monkeypatch) -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    batch = {"index": 1, "size": 2, "commits": ["docs", "runtime"], "first_commit": "docs", "last_commit": "runtime"}
+    risk_map = {("docs", "runtime"): "high", ("docs",): "low", ("runtime",): "high"}
+    file_map = {("docs",): ["docs/notes.md"], ("runtime",): ["hermes_cli/main.py"], ("docs", "runtime"): ["docs/notes.md", "hermes_cli/main.py"]}
+    process_calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[tuple(args[1])])
+    monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", lambda *args, **kwargs: file_map[tuple(args[1])])
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._process_upstream_batch",
+        lambda *args, **kwargs: process_calls.append(tuple(kwargs["batch"]["commits"])) or {
+            "status": "merged",
+            "reason": None,
+            "risk": "low",
+            "commits": kwargs["batch"]["commits"],
+            "files": file_map[tuple(kwargs["batch"]["commits"])],
+            "branch_name": "update-doctor-batch-upstream-01",
+            "pr_url": "https://github.com/Vottam/hermes-agent/pull/101",
+            "merge_commit": "merge-docs",
+            "published": {"tests_run": ["pytest"], "final_validation": {"status": "passed", "checks": ["pytest"]}, "merge_status": "merged"},
+        },
+    )
+
+    summary = _fallback_batch_to_individual_commits(report, root=REPO_ROOT, batch=batch, request_pr=True, request_auto_merge_low_risk=True)
+
+    assert summary["batch_fallback_used"] is True
+    assert summary["fallback_from_batch_size"] == 2
+    assert summary["fallback_commits_processed"] == 2
+    assert summary["fallback_commits_merged"] == 1
+    assert summary["fallback_blocked_commit"] == "runtime"
+    assert summary["fallback_blocked_files"] == ["hermes_cli/main.py"]
+    assert summary["fallback_blocked_reason"] == "batch-risk:high"
+    assert process_calls == [("docs",)]
 def test_batch_upstream_auto_merge_requires_mergeable_clean(monkeypatch) -> None:
     report = _sample_report(replay_result="passed", conflict=None)
     report["environment"]["behind"] = 19
