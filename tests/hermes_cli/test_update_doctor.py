@@ -94,6 +94,26 @@ def _sample_report(*, repair: dict | None = None, replay_result: str = "conflict
             "worktree_status": ["UU hermes_cli/main.py"],
         },
         "verification": {"origin_untouched": True, "main_untouched": True},
+        "covered_upstream_commits": [
+            {
+                "upstream_commit": "1745cfc6d73b69506118526760eb67456e1ef422",
+                "covered_by_commits": [
+                    "a83188672ea860bc5e8b61861b89b97bc41b49b9",
+                    "8e251577d1f44d35eba333bbaa25a2eae5e35cd0",
+                ],
+                "covered_by_pr": 18,
+                "reason": "equivalent fork fix with baseline-aware test",
+                "evidence": [
+                    "web build passed",
+                    "browser-safe-imports test passed",
+                    "update_doctor tests passed",
+                    "profile test passed",
+                ],
+            }
+        ],
+        "covered_upstream_count": 1,
+        "coverage_used": False,
+        "batch_covered_commits": [],
     }
     if repair is not None:
         report["repair"] = repair
@@ -179,6 +199,9 @@ def test_render_report_json_and_yaml_round_trip() -> None:
     assert json.loads(json_text)["replay"]["skipped_duplicate_commits"][0]["bucket"] == "patch-id-duplicate"
     assert json.loads(json_text)["replay"]["skipped_safe_commits"][0]["bucket"] == "already-covered-in-fork-main"
     assert json.loads(json_text)["environment"]["origin_ahead_count"] == 99
+    assert json.loads(json_text)["covered_upstream_commits"][0]["upstream_commit"] == "1745cfc6d73b69506118526760eb67456e1ef422"
+    assert json.loads(json_text)["covered_upstream_count"] == 1
+    assert json.loads(json_text)["coverage_used"] is False
 
 
 def test_render_report_repair_round_trip() -> None:
@@ -228,6 +251,91 @@ def test_render_report_run_round_trip() -> None:
     assert json.loads(json_text) == report
     assert yaml.safe_load(yaml_text) == report
     assert json.loads(json_text)["run_status"] == "clean"
+
+
+def test_batch_upstream_run_skips_explicitly_covered_high_risk_commit(monkeypatch) -> None:
+    covered_commit = "1745cfc6d73b69506118526760eb67456e1ef422"
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._plan_upstream_batches",
+        lambda root, batch_size: [{"index": 1, "size": 1, "commits": [covered_commit]}],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._batch_changed_files",
+        lambda root, commits: ["hermes_cli/main.py"] if commits else [],
+    )
+
+    result = _batch_upstream_run(
+        _sample_report(replay_result="passed", conflict=None),
+        root=Path("/tmp/hermes-update-doctor-test"),
+        request_pr=False,
+        request_auto_merge_low_risk=False,
+        batch_size=5,
+    )
+
+    assert result["coverage_used"] is True
+    assert result["batch_covered_commits"][0]["upstream_commit"] == covered_commit
+    assert result["batches_blocked"] == 0
+    assert result["final_status"] == "completed"
+    assert result["next_step"] == "All upstream batches were covered by fork fixes."
+
+
+def test_batch_upstream_run_blocks_uncovered_high_risk_commit(monkeypatch) -> None:
+    uncovered_commit = "feedfacefeedfacefeedfacefeedfacefeedface"
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._plan_upstream_batches",
+        lambda root, batch_size: [{"index": 1, "size": 1, "commits": [uncovered_commit]}],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._batch_changed_files",
+        lambda root, commits: ["hermes_cli/main.py"] if commits else [],
+    )
+
+    result = _batch_upstream_run(
+        _sample_report(replay_result="passed", conflict=None),
+        root=Path("/tmp/hermes-update-doctor-test"),
+        request_pr=False,
+        request_auto_merge_low_risk=False,
+        batch_size=5,
+    )
+
+    assert result["coverage_used"] is False
+    assert result["batches_blocked"] == 1
+    assert result["blocked_batch_commits"] == [uncovered_commit]
+    assert result["blocked_batch_reason"] == "batch-risk:high"
+    assert result["integration_risk_level"] == "high"
+
+
+def test_batch_upstream_run_keeps_uncovered_high_risk_blocking_even_with_covered_neighbor(monkeypatch) -> None:
+    covered_commit = "1745cfc6d73b69506118526760eb67456e1ef422"
+    uncovered_commit = "feedfacefeedfacefeedfacefeedfacefeedface"
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._plan_upstream_batches",
+        lambda root, batch_size: [{"index": 1, "size": 2, "commits": [covered_commit, uncovered_commit]}],
+    )
+
+    def fake_batch_changed_files(root, commits):
+        if commits == [uncovered_commit]:
+            return ["hermes_cli/main.py"]
+        if commits == [covered_commit]:
+            return ["hermes_cli/main.py"]
+        return ["docs/readme.md"]
+
+    monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", fake_batch_changed_files)
+
+    result = _batch_upstream_run(
+        _sample_report(replay_result="passed", conflict=None),
+        root=Path("/tmp/hermes-update-doctor-test"),
+        request_pr=False,
+        request_auto_merge_low_risk=False,
+        batch_size=5,
+    )
+
+    assert result["coverage_used"] is True
+    assert [item["upstream_commit"] for item in result["batch_covered_commits"]] == [covered_commit]
+    assert result["batches_blocked"] == 1
+    assert result["blocked_batch_commits"] == [uncovered_commit]
+    assert result["blocked_batch_reason"] == "batch-risk:high"
+    assert result["integration_risk_level"] == "high"
 
 
 def test_repair_mode_skip_safe_and_preserves_working_tree(monkeypatch, capsys) -> None:

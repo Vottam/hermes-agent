@@ -53,6 +53,24 @@ SAFE_SKIP_BUCKETS = {
     ConflictBucket.OBSOLETE.value,
 }
 
+COVERED_UPSTREAM_COMMITS: dict[str, dict[str, Any]] = {
+    "1745cfc6d73b69506118526760eb67456e1ef422": {
+        "upstream_commit": "1745cfc6d73b69506118526760eb67456e1ef422",
+        "covered_by_commits": [
+            "a83188672ea860bc5e8b61861b89b97bc41b49b9",
+            "8e251577d1f44d35eba333bbaa25a2eae5e35cd0",
+        ],
+        "covered_by_pr": 18,
+        "reason": "equivalent fork fix with baseline-aware test",
+        "evidence": [
+            "web build passed",
+            "browser-safe-imports test passed",
+            "update_doctor tests passed",
+            "profile test passed",
+        ],
+    },
+}
+
 
 @dataclass(slots=True)
 class GitCommandError(RuntimeError):
@@ -101,6 +119,27 @@ def _git_optional_lines(args: Sequence[str], *, cwd: Path) -> list[str]:
     if not output:
         return []
     return [line for line in (line.strip() for line in output.splitlines()) if line]
+
+
+def _coverage_record(commit: str) -> dict[str, Any] | None:
+    record = COVERED_UPSTREAM_COMMITS.get(commit)
+    if not record:
+        return None
+    return {
+        "upstream_commit": record["upstream_commit"],
+        "covered_by_commits": list(record["covered_by_commits"]),
+        "covered_by_pr": record["covered_by_pr"],
+        "reason": record["reason"],
+        "evidence": list(record["evidence"]),
+    }
+
+
+def _covered_upstream_commits_for(commits: Sequence[str]) -> list[dict[str, Any]]:
+    return [record for commit in commits if (record := _coverage_record(commit))]
+
+
+def _uncovered_commits(commits: Sequence[str]) -> list[str]:
+    return [commit for commit in commits if _coverage_record(commit) is None]
 
 
 def _require_repo_root(cwd: Path | None = None) -> Path:
@@ -797,8 +836,10 @@ def _process_upstream_batch(
     refresh_after_merge: bool = True,
 ) -> dict[str, Any]:
     batch_commits = list(batch["commits"])
-    batch_files = _batch_changed_files(root, batch_commits)
-    batch_risk = _classify_upstream_batch_risk(root, batch_commits)
+    batch_covered_commits = _covered_upstream_commits_for(batch_commits)
+    effective_commits = _uncovered_commits(batch_commits)
+    batch_files = _batch_changed_files(root, effective_commits or batch_commits)
+    batch_risk = _classify_upstream_batch_risk(root, effective_commits)
     batch_label = f"{batch['index']:02d}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     branch_name = f"update-doctor-batch-upstream-{batch_label}"
     worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-batch-"))
@@ -808,7 +849,24 @@ def _process_upstream_batch(
         _run_git(["worktree", "add", "--detach", str(worktree_path), "fork/main"], cwd=root)
         _run_git(["switch", "-c", branch_name], cwd=worktree_path)
 
-        for commit in batch_commits:
+        if not effective_commits:
+            return {
+                "status": "covered",
+                "reason": None,
+                "risk": "low",
+                "commits": batch_commits,
+                "files": batch_files,
+                "branch_name": branch_name,
+                "pr_url": None,
+                "merge_commit": None,
+                "published": None,
+                "batch_covered_commits": batch_covered_commits,
+                "coverage_used": bool(batch_covered_commits),
+                "covered_upstream_commits": [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS],
+                "covered_upstream_count": len(COVERED_UPSTREAM_COMMITS),
+            }
+
+        for commit in effective_commits:
             cherry = _run_git(["cherry-pick", "--no-edit", commit], cwd=worktree_path, check=False)
             if cherry.returncode != 0:
                 conflict_bucket = classify_conflict(
@@ -823,12 +881,16 @@ def _process_upstream_batch(
                     "status": "blocked",
                     "reason": f"batch-conflict:{conflict_bucket.value}",
                     "risk": batch_risk,
-                    "commits": batch_commits,
+                    "commits": effective_commits,
                     "files": batch_files,
                     "branch_name": branch_name,
                     "pr_url": None,
                     "merge_commit": None,
                     "published": None,
+                    "batch_covered_commits": batch_covered_commits,
+                    "coverage_used": bool(batch_covered_commits),
+                    "covered_upstream_commits": [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS],
+                    "covered_upstream_count": len(COVERED_UPSTREAM_COMMITS),
                 }
 
         batch_report = dict(report)
@@ -868,6 +930,10 @@ def _process_upstream_batch(
             "published": published,
             "worktree_parent": worktree_parent,
             "worktree_path": worktree_path,
+            "batch_covered_commits": batch_covered_commits,
+            "coverage_used": bool(batch_covered_commits),
+            "covered_upstream_commits": [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS],
+            "covered_upstream_count": len(COVERED_UPSTREAM_COMMITS),
         }
     finally:
         _run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=root, check=False)
@@ -952,12 +1018,22 @@ def _fallback_batch_to_individual_commits(
         "published": [],
         "tests_run": [],
         "final_validation": {"status": "not-needed", "checks": []},
+        "batch_covered_commits": [],
+        "coverage_used": False,
+        "covered_upstream_commits": [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS],
+        "covered_upstream_count": len(COVERED_UPSTREAM_COMMITS),
     }
 
     for offset, commit in enumerate(batch_commits, start=1):
         single_risk = _classify_upstream_batch_risk(root, [commit])
         single_files = _batch_changed_files(root, [commit])
         fallback["fallback_commits_processed"] += 1
+
+        coverage_record = _coverage_record(commit)
+        if coverage_record:
+            fallback["coverage_used"] = True
+            fallback["batch_covered_commits"].append(coverage_record)
+            continue
 
         if single_risk != "low":
             medium_triage: dict[str, Any] = {}
@@ -1413,26 +1489,43 @@ def _batch_upstream_run(
         "tests_run": [],
         "final_validation": {"status": "not-needed", "checks": []},
         "next_step": "No upstream batches were pending." if not batches else f"Planned {len(batches)} upstream batches of size {batch_size}.",
+        "covered_upstream_commits": report.get("covered_upstream_commits", [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS]),
+        "covered_upstream_count": report.get("covered_upstream_count", len(COVERED_UPSTREAM_COMMITS)),
+        "coverage_used": False,
+        "batch_covered_commits": [],
     }
 
     if not batches:
         return summary
 
     for batch in batches:
-        batch_risk = _classify_upstream_batch_risk(root, batch["commits"])
-        batch_files = _batch_changed_files(root, batch["commits"])
+        covered_records = _covered_upstream_commits_for(batch["commits"])
+        effective_commits = _uncovered_commits(batch["commits"])
+        batch_files = _batch_changed_files(root, effective_commits or batch["commits"])
+        batch_risk = _classify_upstream_batch_risk(root, effective_commits)
         summary["batches_processed"] += 1
         summary["upstream_batches"].append(
             {
                 "index": batch["index"],
                 "size": batch["size"],
                 "commits": batch["commits"],
+                "covered_commits": [record["upstream_commit"] for record in covered_records],
+                "coverage_used": bool(covered_records),
+                "effective_commits": effective_commits,
                 "files": batch_files,
                 "risk": batch_risk,
             }
         )
 
-        if batch_risk != "low" and len(batch["commits"]) > 1:
+        if covered_records:
+            summary["coverage_used"] = True
+            summary["batch_covered_commits"].extend(covered_records)
+
+        if not effective_commits:
+            summary["next_step"] = f"Batch {batch['index']} fully covered by fork fixes."
+            continue
+
+        if batch_risk != "low" and len(effective_commits) > 1:
             fallback_result = _fallback_batch_to_individual_commits(
                 report,
                 root=root,
@@ -1513,7 +1606,7 @@ def _batch_upstream_run(
         if batch_risk != "low":
             summary["batches_blocked"] += 1
             summary["blocked_batch_reason"] = f"batch-risk:{batch_risk}"
-            summary["blocked_batch_commits"] = batch["commits"]
+            summary["blocked_batch_commits"] = effective_commits
             summary["blocked_batch_files"] = batch_files
             summary["final_status"] = "blocked"
             summary["run_status"] = "blocked"
@@ -1534,7 +1627,17 @@ def _batch_upstream_run(
             request_auto_merge_low_risk=request_auto_merge_low_risk,
             refresh_after_merge=False,
         )
-        summary["pr_urls"].append(batch_result.get("pr_url"))
+        if batch_result.get("pr_url"):
+            summary["pr_urls"].append(batch_result.get("pr_url"))
+        if batch_result.get("status") == "covered":
+            summary["coverage_used"] = True
+            summary["batch_covered_commits"].extend(batch_result.get("batch_covered_commits", []))
+            summary["upstream_batches"][-1]["coverage_used"] = True
+            summary["upstream_batches"][-1]["covered_commits"] = [
+                record["upstream_commit"] for record in batch_result.get("batch_covered_commits", [])
+            ]
+            summary["next_step"] = f"Batch {batch['index']} fully covered by fork fixes."
+            continue
         if batch_result.get("status") == "blocked":
             summary["batches_blocked"] += 1
             summary["blocked_batch_reason"] = batch_result.get("reason") or "batch-processing-blocked"
@@ -1586,6 +1689,13 @@ def _batch_upstream_run(
         summary["integration_risk_level"] = "low"
         summary["integration_blockers"] = []
         summary["next_step"] = "All upstream batches were processed successfully."
+    elif summary["batches_blocked"] == 0 and not summary["pr_urls"] and summary["batches_processed"] == summary["batches_total"]:
+        summary["final_status"] = "completed"
+        summary["run_status"] = "completed"
+        summary["integration_status"] = "batched-completed"
+        summary["integration_risk_level"] = "low"
+        summary["integration_blockers"] = []
+        summary["next_step"] = "All upstream batches were covered by fork fixes."
     summary["material_changes_detected"] = summary["batches_merged"] > 0 or bool(summary["pr_urls"])
     return summary
 
@@ -1766,6 +1876,10 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
 
     candidates = _candidate_commits(root, replay_base=replay_base)
     candidate_count = len(candidates)
+    covered_upstream_commits = [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS]
+    covered_upstream_count = len(covered_upstream_commits)
+    coverage_used = False
+    batch_covered_commits: list[dict[str, Any]] = []
 
     worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-"))
     worktree_path = worktree_parent / "worktree"
@@ -1786,6 +1900,25 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
             patch_id = _commit_patch_id(root, commit)
             subject = _commit_subject(root, commit)
             files_touched = _commit_files(root, commit)
+            coverage_record = _coverage_record(commit)
+            if coverage_record:
+                coverage_used = True
+                batch_covered_commits.append(coverage_record)
+                skipped_safe_commits.append(
+                    {
+                        "commit": commit,
+                        "subject": subject,
+                        "patch_id": patch_id,
+                        "bucket": "covered-upstream-commit",
+                        "covered_by_commits": coverage_record["covered_by_commits"],
+                        "covered_by_pr": coverage_record["covered_by_pr"],
+                        "reason": coverage_record["reason"],
+                    }
+                )
+                replay_continued_after_skip = True
+                if patch_id:
+                    seen_patch_ids.add(patch_id)
+                continue
             if patch_id and patch_id in seen_patch_ids:
                 skipped_duplicate_commits.append(
                     {
@@ -1858,6 +1991,10 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
                 },
                 "conflict": None,
                 "verification": {"origin_untouched": True, "main_untouched": True},
+                "covered_upstream_commits": covered_upstream_commits,
+                "covered_upstream_count": covered_upstream_count,
+                "coverage_used": coverage_used,
+                "batch_covered_commits": batch_covered_commits,
             }
 
         coverage_refs = _coverage_refs(root, conflict_commit)
@@ -1900,6 +2037,10 @@ def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict
             },
             "conflict": conflict,
             "verification": {"origin_untouched": True, "main_untouched": True},
+            "covered_upstream_commits": covered_upstream_commits,
+            "covered_upstream_count": covered_upstream_count,
+            "coverage_used": coverage_used,
+            "batch_covered_commits": batch_covered_commits,
         }
     finally:
         _run_git(["worktree", "remove", "--force", str(worktree_path)], cwd=root, check=False)
