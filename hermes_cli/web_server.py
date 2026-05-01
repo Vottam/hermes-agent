@@ -2167,6 +2167,29 @@ def _resolve_profile_dir(name: str) -> Path:
     return profiles_mod.get_profile_dir(name)
 
 
+def _profile_setup_command(name: str) -> str:
+    """Return the shell command used to configure a profile in the CLI."""
+    _resolve_profile_dir(name)
+    return "hermes setup" if name == "default" else f"{name} setup"
+
+
+def _launch_profile_setup_terminal(name: str) -> None:
+    """Open a terminal window and run the profile setup command."""
+    command = _profile_setup_command(name)
+    if sys.platform == "darwin":
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.Popen([
+            "osascript",
+            "-e",
+            f'tell application "Terminal" to do script "{escaped}"',
+        ])
+        return
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["cmd.exe", "/c", "start", "", "cmd", "/k", command])
+        return
+    subprocess.Popen(["sh", "-lc", command])
+
+
 @app.get("/api/profiles")
 async def list_profiles_endpoint():
     from hermes_cli import profiles as profiles_mod
@@ -2182,12 +2205,34 @@ async def create_profile_endpoint(body: ProfileCreate):
             clone_from="default" if body.clone_from_default else None,
             clone_config=body.clone_from_default,
         )
+        # Match the CLI's profile-create flow: named profiles should get a
+        # wrapper in ~/.local/bin when the alias is safe to create.
+        collision = profiles_mod.check_alias_collision(body.name)
+        if not collision:
+            profiles_mod.create_wrapper_script(body.name)
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         _log.exception("POST /api/profiles failed")
         raise HTTPException(status_code=500, detail=str(e))
     return {"ok": True, "name": body.name, "path": str(path)}
+
+
+@app.get("/api/profiles/{name}/setup-command")
+async def get_profile_setup_command(name: str):
+    return {"command": _profile_setup_command(name)}
+
+
+@app.post("/api/profiles/{name}/open-terminal")
+async def open_profile_terminal(name: str):
+    try:
+        _launch_profile_setup_terminal(name)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        _log.exception("POST /api/profiles/%s/open-terminal failed", name)
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True, "command": _profile_setup_command(name)}
 
 
 @app.patch("/api/profiles/{name}")
