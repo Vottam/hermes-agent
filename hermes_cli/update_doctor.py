@@ -927,6 +927,13 @@ def _fallback_batch_to_individual_commits(
         "fallback_blocked_commit": None,
         "fallback_blocked_files": [],
         "fallback_blocked_reason": None,
+        "medium_triage_used": False,
+        "medium_blocked_commit": None,
+        "medium_blocked_subject": None,
+        "medium_blocked_files": [],
+        "medium_blocked_reasons": [],
+        "medium_suggested_tests": [],
+        "medium_reclassification_candidate": False,
         "pr_urls": [],
         "merge_commits": [],
         "published": [],
@@ -940,6 +947,9 @@ def _fallback_batch_to_individual_commits(
         fallback["fallback_commits_processed"] += 1
 
         if single_risk != "low":
+            medium_triage: dict[str, Any] = {}
+            if single_risk == "medium":
+                medium_triage = _triage_medium_commit(root, commit, files=single_files, subject=_commit_subject(root, commit))
             fallback.update(
                 {
                     "status": "blocked",
@@ -950,6 +960,18 @@ def _fallback_batch_to_individual_commits(
                     "fallback_blocked_reason": f"batch-risk:{single_risk}",
                 }
             )
+            if medium_triage:
+                fallback.update(
+                    {
+                        "medium_triage_used": True,
+                        "medium_blocked_commit": medium_triage["commit"],
+                        "medium_blocked_subject": medium_triage["subject"],
+                        "medium_blocked_files": medium_triage["files"],
+                        "medium_blocked_reasons": medium_triage["reasons"],
+                        "medium_suggested_tests": medium_triage["suggested_tests"],
+                        "medium_reclassification_candidate": medium_triage["reclassification_candidate"],
+                    }
+                )
             return fallback
 
         if not request_pr:
@@ -1015,6 +1037,50 @@ def _fallback_batch_to_individual_commits(
     return fallback
 
 
+def _triage_medium_commit(
+    root: Path,
+    commit: str,
+    *,
+    files: Sequence[str] | None = None,
+    subject: str | None = None,
+) -> dict[str, Any]:
+    resolved_files = list(files) if files is not None else _commit_files(root, commit)
+    resolved_subject = subject or _commit_subject(root, commit)
+    reasons: list[str] = []
+    suggested_tests: list[str] = []
+
+    if "hermes_cli/web_server.py" in resolved_files:
+        reasons.append("touches hermes_cli/web_server.py (runtime web server path)")
+        suggested_tests.append("pytest tests/hermes_cli/test_web_server.py -k profile -q")
+
+    web_files = [path for path in resolved_files if path.startswith("web/")]
+    if web_files:
+        reasons.append(f"touches web UI/API files ({len(web_files)} path(s))")
+        suggested_tests.append("cd web && npm run build")
+
+    test_files = [path for path in resolved_files if path.startswith("tests/")]
+    if test_files:
+        reasons.append(f"updates targeted tests ({len(test_files)} path(s))")
+        suggested_tests.append("pytest tests/hermes_cli/test_web_server.py -q")
+
+    if not reasons:
+        reasons.append("contains mixed-risk files outside the low-risk docs/tests allowlist")
+
+    deduped_tests: list[str] = []
+    for test in suggested_tests:
+        if test not in deduped_tests:
+            deduped_tests.append(test)
+
+    return {
+        "commit": commit,
+        "subject": resolved_subject,
+        "files": resolved_files,
+        "reasons": reasons,
+        "suggested_tests": deduped_tests,
+        "reclassification_candidate": not any(_is_high_risk_path(path) for path in resolved_files),
+    }
+
+
 def _batch_upstream_run(
     report: dict[str, Any],
     *,
@@ -1044,6 +1110,13 @@ def _batch_upstream_run(
         "fallback_blocked_commit": None,
         "fallback_blocked_files": [],
         "fallback_blocked_reason": None,
+        "medium_triage_used": False,
+        "medium_blocked_commit": None,
+        "medium_blocked_subject": None,
+        "medium_blocked_files": [],
+        "medium_blocked_reasons": [],
+        "medium_suggested_tests": [],
+        "medium_reclassification_candidate": False,
         "final_status": "completed" if not batches else "planned",
         "integration_status": "batched-upstream",
         "integration_risk_level": "low",
@@ -1102,6 +1175,13 @@ def _batch_upstream_run(
                 summary["fallback_blocked_commit"] = fallback_result.get("fallback_blocked_commit")
                 summary["fallback_blocked_files"] = fallback_result.get("fallback_blocked_files") or []
                 summary["fallback_blocked_reason"] = fallback_result.get("fallback_blocked_reason")
+                summary["medium_triage_used"] = fallback_result.get("medium_triage_used", False)
+                summary["medium_blocked_commit"] = fallback_result.get("medium_blocked_commit")
+                summary["medium_blocked_subject"] = fallback_result.get("medium_blocked_subject")
+                summary["medium_blocked_files"] = fallback_result.get("medium_blocked_files") or []
+                summary["medium_blocked_reasons"] = fallback_result.get("medium_blocked_reasons") or []
+                summary["medium_suggested_tests"] = fallback_result.get("medium_suggested_tests") or []
+                summary["medium_reclassification_candidate"] = fallback_result.get("medium_reclassification_candidate", False)
                 summary["final_status"] = "blocked"
                 summary["run_status"] = "blocked"
                 summary["integration_status"] = "blocked-batch-risk"
@@ -1322,6 +1402,15 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  fallback commits merged: {report.get('fallback_commits_merged')}")
         lines.append(f"  fallback blocked reason: {report.get('fallback_blocked_reason') or '<none>'}")
         lines.append(f"  fallback blocked commit: {report.get('fallback_blocked_commit') or '<none>'}")
+        lines.append(f"  medium triage used: {bool(report.get('medium_triage_used'))}")
+        lines.append(f"  medium blocked commit: {report.get('medium_blocked_commit') or '<none>'}")
+        lines.append(f"  medium blocked subject: {report.get('medium_blocked_subject') or '<none>'}")
+        lines.append(f"  medium blocked files: {len(report.get('medium_blocked_files') or [])}")
+        if report.get("medium_blocked_reasons"):
+            lines.append(f"  medium blocked reasons: {'; '.join(report['medium_blocked_reasons'])}")
+        if report.get("medium_suggested_tests"):
+            lines.append(f"  medium suggested tests: {'; '.join(report['medium_suggested_tests'])}")
+        lines.append(f"  medium reclassification candidate: {bool(report.get('medium_reclassification_candidate'))}")
         lines.append(f"  blocked batch reason: {report.get('blocked_batch_reason') or '<none>'}")
         lines.append(f"  blocked batch commits: {len(report.get('blocked_batch_commits') or [])}")
         lines.append(f"  blocked batch files: {len(report.get('blocked_batch_files') or [])}")
