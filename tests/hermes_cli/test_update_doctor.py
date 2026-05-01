@@ -17,7 +17,9 @@ from hermes_cli.update_doctor import (
     _classify_upstream_batch_risk,
     _fallback_batch_to_individual_commits,
     _plan_upstream_batches,
+    _prepare_medium_web_sandbox,
     _publish_run_artifacts,
+    _run_medium_commit_sandbox_tests,
 )
 
 
@@ -610,6 +612,8 @@ def test_fallback_batch_to_individual_commits_blocks_medium_commit_when_sandbox_
             "tests_run": ["pytest tests/hermes_cli/test_web_server.py -k profile -q"],
             "tests_passed": [],
             "test_failures": ["pytest tests/hermes_cli/test_web_server.py -k profile -q (exit 1)"],
+            "medium_sandbox_prepared": False,
+            "medium_sandbox_preparation": [],
             "branch_name": "update-doctor-medium-tested-4523965d",
         },
     )
@@ -629,7 +633,84 @@ def test_fallback_batch_to_individual_commits_blocks_medium_commit_when_sandbox_
     assert summary["medium_tests_run"] == ["pytest tests/hermes_cli/test_web_server.py -k profile -q"]
     assert summary["medium_tests_passed"] == []
     assert summary["medium_test_failures"] == ["pytest tests/hermes_cli/test_web_server.py -k profile -q (exit 1)"]
+    assert summary["medium_sandbox_prepared"] is False
+    assert summary["medium_sandbox_preparation"] == []
     assert process_calls == []
+
+
+def test_prepare_medium_web_sandbox_links_checkout_node_modules(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    worktree = tmp_path / "worktree"
+    (root / "web" / "node_modules").mkdir(parents=True)
+
+    result = _prepare_medium_web_sandbox(root, worktree)
+
+    linked = worktree / "web" / "node_modules"
+    assert result["prepared"] is True
+    assert result["preparation"] == ["linked web/node_modules"]
+    assert result["failure"] is None
+    assert linked.is_symlink()
+    assert linked.resolve() == (root / "web" / "node_modules").resolve()
+
+
+def test_prepare_medium_web_sandbox_does_not_overwrite_existing_node_modules(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    worktree = tmp_path / "worktree"
+    (root / "web" / "node_modules").mkdir(parents=True)
+    existing = worktree / "web" / "node_modules"
+    existing.mkdir(parents=True)
+    sentinel = existing / "sentinel.txt"
+    sentinel.write_text("keep")
+
+    result = _prepare_medium_web_sandbox(root, worktree)
+
+    assert result["prepared"] is False
+    assert result["preparation"] == []
+    assert result["failure"] is None
+    assert sentinel.read_text() == "keep"
+    assert existing.is_dir()
+    assert not existing.is_symlink()
+
+
+def test_medium_sandbox_does_not_prepare_without_web_build(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "root"
+
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd and cmd[0].endswith("python") and cmd[1:3] == ["-m", "pytest"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("hermes_cli.update_doctor._prepare_medium_web_sandbox", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sandbox prep should not run")))
+    monkeypatch.setattr("hermes_cli.update_doctor.subprocess.run", fake_run)
+
+    result = _run_medium_commit_sandbox_tests(root, "4523965de9eb9a55ba7a67315adc3188c31eaec4", ["pytest tests/hermes_cli/test_web_server.py -q"])
+
+    assert result["status"] == "passed"
+    assert result["medium_sandbox_prepared"] is False
+    assert result["medium_sandbox_preparation"] == []
+
+
+def test_medium_sandbox_prepares_web_build_with_linked_node_modules(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "web" / "node_modules").mkdir(parents=True)
+
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd and cmd[0] == "bash" and cmd[1:3] == ["-lc", "cd web && npm run build"]:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("hermes_cli.update_doctor.subprocess.run", fake_run)
+
+    result = _run_medium_commit_sandbox_tests(root, "4523965de9eb9a55ba7a67315adc3188c31eaec4", ["cd web && npm run build"])
+
+    linked = result["medium_sandbox_preparation"]
+    assert result["status"] == "passed"
+    assert result["medium_sandbox_prepared"] is True
+    assert linked == ["linked web/node_modules"]
 
 
 def test_fallback_batch_to_individual_commits_marks_medium_tested_without_pr(monkeypatch) -> None:
@@ -679,6 +760,8 @@ def test_fallback_batch_to_individual_commits_marks_medium_tested_without_pr(mon
                 "pytest tests/hermes_cli/test_web_server.py -q",
             ],
             "test_failures": [],
+            "medium_sandbox_prepared": True,
+            "medium_sandbox_preparation": ["linked web/node_modules"],
             "branch_name": "update-doctor-medium-tested-4523965d",
         },
     )
@@ -695,6 +778,8 @@ def test_fallback_batch_to_individual_commits_marks_medium_tested_without_pr(mon
     assert summary["medium_triage_used"] is True
     assert summary["medium_tested_status"] == "passed"
     assert summary["medium_pr_eligible"] is True
+    assert summary["medium_sandbox_prepared"] is True
+    assert summary["medium_sandbox_preparation"] == ["linked web/node_modules"]
     assert summary["medium_tests_run"] == [
         "pytest tests/hermes_cli/test_web_server.py -k profile -q",
         "cd web && npm run build",
@@ -752,6 +837,8 @@ def test_fallback_batch_to_individual_commits_creates_pr_for_medium_tested_commi
                 "pytest tests/hermes_cli/test_web_server.py -q",
             ],
             "test_failures": [],
+            "medium_sandbox_prepared": True,
+            "medium_sandbox_preparation": ["linked web/node_modules"],
             "branch_name": "update-doctor-medium-tested-4523965d",
         },
     )
@@ -788,6 +875,8 @@ def test_fallback_batch_to_individual_commits_creates_pr_for_medium_tested_commi
     assert summary["medium_triage_used"] is True
     assert summary["medium_tested_status"] == "passed"
     assert summary["medium_pr_eligible"] is True
+    assert summary["medium_sandbox_prepared"] is True
+    assert summary["medium_sandbox_preparation"] == ["linked web/node_modules"]
     assert summary["medium_tests_run"] == [
         "pytest tests/hermes_cli/test_web_server.py -k profile -q",
         "cd web && npm run build",

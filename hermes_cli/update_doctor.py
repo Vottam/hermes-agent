@@ -939,6 +939,8 @@ def _fallback_batch_to_individual_commits(
         "medium_test_failures": [],
         "medium_tested_status": "not-run",
         "medium_pr_eligible": False,
+        "medium_sandbox_prepared": False,
+        "medium_sandbox_preparation": [],
         "medium_reclassification_candidate": False,
         "pr_status": "not-requested",
         "merge_status": "not-needed",
@@ -979,6 +981,8 @@ def _fallback_batch_to_individual_commits(
                     "medium_tested_status": medium_test_result.get("status", "failed"),
                     "medium_pr_eligible": medium_test_result.get("status") == "passed",
                     "medium_reclassification_candidate": medium_triage.get("reclassification_candidate", False),
+                    "medium_sandbox_prepared": medium_test_result.get("medium_sandbox_prepared", False),
+                    "medium_sandbox_preparation": medium_test_result.get("medium_sandbox_preparation", []),
                 }
             )
             if medium_triage and medium_test_result.get("status") == "passed":
@@ -1166,6 +1170,44 @@ def _triage_medium_commit(
     }
 
 
+def _prepare_medium_web_sandbox(root: Path, worktree_path: Path) -> dict[str, Any]:
+    worktree_web = worktree_path / "web"
+    worktree_node_modules = worktree_web / "node_modules"
+    root_node_modules = root / "web" / "node_modules"
+    if worktree_node_modules.exists() or worktree_node_modules.is_symlink():
+        return {"prepared": False, "preparation": [], "failure": None}
+    if not root_node_modules.exists():
+        return {
+            "prepared": False,
+            "preparation": [],
+            "failure": f"missing web dependencies: {root_node_modules}",
+        }
+
+    worktree_web.mkdir(parents=True, exist_ok=True)
+    if worktree_node_modules.exists() or worktree_node_modules.is_symlink():
+        return {"prepared": False, "preparation": [], "failure": None}
+
+    expected_target = root_node_modules.resolve()
+    if not expected_target.is_relative_to((root / "web").resolve()):
+        return {
+            "prepared": False,
+            "preparation": [],
+            "failure": f"refusing to link sandbox dependencies outside {root / 'web' / 'node_modules'}",
+        }
+
+    worktree_node_modules.symlink_to(expected_target)
+    if worktree_node_modules.resolve() != expected_target:
+        if worktree_node_modules.is_symlink():
+            worktree_node_modules.unlink()
+        return {
+            "prepared": False,
+            "preparation": [],
+            "failure": f"failed to link sandbox dependencies from {expected_target}",
+        }
+
+    return {"prepared": True, "preparation": ["linked web/node_modules"], "failure": None}
+
+
 def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: Sequence[str]) -> dict[str, Any]:
     worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-medium-", dir="/tmp"))
     worktree_path = worktree_parent / "worktree"
@@ -1173,6 +1215,8 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
     tests_run: list[str] = []
     tests_passed: list[str] = []
     test_failures: list[str] = []
+    sandbox_prepared = False
+    sandbox_preparation: list[str] = []
     python_bin = root / "venv" / "bin" / "python"
 
     def _run_test_command(command: str) -> subprocess.CompletedProcess[str]:
@@ -1211,11 +1255,28 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
                 "tests_run": tests_run,
                 "tests_passed": tests_passed,
                 "test_failures": test_failures,
+                "medium_sandbox_prepared": sandbox_prepared,
+                "medium_sandbox_preparation": sandbox_preparation,
                 "branch_name": branch_name,
             }
 
         for command in suggested_tests:
             tests_run.append(command)
+            if command == "cd web && npm run build":
+                sandbox = _prepare_medium_web_sandbox(root, worktree_path)
+                sandbox_prepared = sandbox["prepared"] or sandbox_prepared
+                sandbox_preparation.extend(sandbox["preparation"])
+                if sandbox["failure"]:
+                    test_failures.append(sandbox["failure"])
+                    return {
+                        "status": "failed",
+                        "tests_run": tests_run,
+                        "tests_passed": tests_passed,
+                        "test_failures": test_failures,
+                        "medium_sandbox_prepared": sandbox_prepared,
+                        "medium_sandbox_preparation": sandbox_preparation,
+                        "branch_name": branch_name,
+                    }
             result = _run_test_command(command)
             if result.returncode != 0:
                 test_failures.append(f"{command} (exit {result.returncode})")
@@ -1224,6 +1285,8 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
                     "tests_run": tests_run,
                     "tests_passed": tests_passed,
                     "test_failures": test_failures,
+                    "medium_sandbox_prepared": sandbox_prepared,
+                    "medium_sandbox_preparation": sandbox_preparation,
                     "branch_name": branch_name,
                 }
             tests_passed.append(command)
@@ -1233,6 +1296,8 @@ def _run_medium_commit_sandbox_tests(root: Path, commit: str, suggested_tests: S
             "tests_run": tests_run,
             "tests_passed": tests_passed,
             "test_failures": test_failures,
+            "medium_sandbox_prepared": sandbox_prepared,
+            "medium_sandbox_preparation": sandbox_preparation,
             "branch_name": branch_name,
         }
     finally:
@@ -1282,6 +1347,8 @@ def _batch_upstream_run(
         "medium_test_failures": [],
         "medium_tested_status": "not-run",
         "medium_pr_eligible": False,
+        "medium_sandbox_prepared": False,
+        "medium_sandbox_preparation": [],
         "final_status": "completed" if not batches else "planned",
         "integration_status": "batched-upstream",
         "integration_risk_level": "low",
@@ -1343,6 +1410,8 @@ def _batch_upstream_run(
             summary["medium_test_failures"] = fallback_result.get("medium_test_failures") or []
             summary["medium_tested_status"] = fallback_result.get("medium_tested_status") or "not-run"
             summary["medium_pr_eligible"] = fallback_result.get("medium_pr_eligible", False)
+            summary["medium_sandbox_prepared"] = fallback_result.get("medium_sandbox_prepared", False)
+            summary["medium_sandbox_preparation"] = fallback_result.get("medium_sandbox_preparation") or []
             summary["pr_status"] = fallback_result.get("pr_status", summary["pr_status"])
             summary["merge_status"] = fallback_result.get("merge_status", summary["merge_status"])
 
