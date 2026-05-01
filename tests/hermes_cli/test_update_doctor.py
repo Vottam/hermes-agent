@@ -570,6 +570,81 @@ def test_fallback_batch_to_individual_commits_blocks_on_runtime(monkeypatch) -> 
     assert summary["fallback_blocked_files"] == ["hermes_cli/main.py"]
     assert summary["fallback_blocked_reason"] == "batch-risk:high"
     assert process_calls == [("docs",)]
+def test_fallback_batch_to_individual_commits_triages_medium_commit(monkeypatch) -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    batch = {
+        "index": 1,
+        "size": 2,
+        "commits": ["docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"],
+        "first_commit": "docs",
+        "last_commit": "4523965de9eb9a55ba7a67315adc3188c31eaec4",
+    }
+    risk_map = {
+        ("docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"): "high",
+        ("docs",): "low",
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",): "medium",
+    }
+    medium_files = [
+        "hermes_cli/web_server.py",
+        "tests/hermes_cli/test_web_server.py",
+        "web/src/App.tsx",
+        "web/src/i18n/en.ts",
+        "web/src/i18n/types.ts",
+        "web/src/i18n/zh.ts",
+        "web/src/lib/api.ts",
+        "web/src/pages/ProfilesPage.tsx",
+    ]
+    file_map = {
+        ("docs",): ["docs/notes.md"],
+        ("4523965de9eb9a55ba7a67315adc3188c31eaec4",): medium_files,
+        ("docs", "4523965de9eb9a55ba7a67315adc3188c31eaec4"): ["docs/notes.md", *medium_files],
+    }
+    process_calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr("hermes_cli.update_doctor._classify_upstream_batch_risk", lambda *args, **kwargs: risk_map[tuple(args[1])])
+    monkeypatch.setattr("hermes_cli.update_doctor._batch_changed_files", lambda *args, **kwargs: file_map[tuple(args[1])])
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._process_upstream_batch",
+        lambda *args, **kwargs: process_calls.append(tuple(kwargs["batch"]["commits"])) or {
+            "status": "merged",
+            "reason": None,
+            "risk": "low",
+            "commits": kwargs["batch"]["commits"],
+            "files": file_map[tuple(kwargs["batch"]["commits"])],
+            "branch_name": "update-doctor-batch-upstream-01",
+            "pr_url": "https://github.com/Vottam/hermes-agent/pull/101",
+            "merge_commit": "merge-docs",
+            "published": {"tests_run": ["pytest"], "final_validation": {"status": "passed", "checks": ["pytest"]}, "merge_status": "merged"},
+        },
+    )
+
+    summary = _fallback_batch_to_individual_commits(report, root=REPO_ROOT, batch=batch, request_pr=True, request_auto_merge_low_risk=True)
+
+    assert summary["batch_fallback_used"] is True
+    assert summary["fallback_from_batch_size"] == 2
+    assert summary["fallback_commits_processed"] == 2
+    assert summary["fallback_commits_merged"] == 1
+    assert summary["fallback_blocked_commit"] == "4523965de9eb9a55ba7a67315adc3188c31eaec4"
+    assert summary["fallback_blocked_files"] == medium_files
+    assert summary["fallback_blocked_reason"] == "batch-risk:medium"
+    assert summary["medium_triage_used"] is True
+    assert summary["medium_blocked_commit"] == "4523965de9eb9a55ba7a67315adc3188c31eaec4"
+    assert summary["medium_blocked_subject"] == "feat(dashboard): add profiles management page"
+    assert summary["medium_blocked_files"] == medium_files
+    assert summary["medium_blocked_reasons"] == [
+        "touches hermes_cli/web_server.py (runtime web server path)",
+        "touches web UI/API files (6 path(s))",
+        "updates targeted tests (1 path(s))",
+    ]
+    assert summary["medium_suggested_tests"] == [
+        "pytest tests/hermes_cli/test_web_server.py -k profile -q",
+        "cd web && npm run build",
+        "pytest tests/hermes_cli/test_web_server.py -q",
+    ]
+    assert summary["medium_reclassification_candidate"] is True
+    assert process_calls == [("docs",)]
+
+
 def test_batch_upstream_auto_merge_requires_mergeable_clean(monkeypatch) -> None:
     report = _sample_report(replay_result="passed", conflict=None)
     report["environment"]["behind"] = 19
