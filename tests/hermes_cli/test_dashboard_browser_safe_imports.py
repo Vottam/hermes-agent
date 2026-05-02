@@ -42,10 +42,11 @@ MIGRATED_FILES = {
 
 def test_dashboard_does_not_introduce_new_nous_ui_root_barrel_offenders():
     offenders = set()
-    for path in WEB_SRC.rglob("*.tsx"):
-        content = path.read_text(encoding="utf-8")
-        if 'from "@nous-research/ui"' in content or "from '@nous-research/ui'" in content:
-            offenders.add(str(path.relative_to(WEB_SRC)))
+    for ext in ("*.tsx", "*.ts"):
+        for path in WEB_SRC.rglob(ext):
+            content = path.read_text(encoding="utf-8")
+            if 'from "@nous-research/ui"' in content or "from '@nous-research/ui'" in content:
+                offenders.add(str(path.relative_to(WEB_SRC)))
 
     unexpected = offenders - LEGACY_ROOT_BARREL_OFFENDERS
     assert unexpected == set(), f"Unexpected root-barrel offenders: {sorted(unexpected)}"
