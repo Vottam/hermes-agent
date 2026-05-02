@@ -570,6 +570,14 @@ def _is_low_risk_path(path: str) -> bool:
     )
 
 
+LOCKFILE_METADATA_ONLY_PATH = "web/package-lock.json"
+LOCKFILE_METADATA_ALLOWED_KEYS = {"peer"}
+LOCKFILE_METADATA_VALIDATION_COMMANDS = (
+    "cd web && npm run build",
+    "./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q",
+)
+
+
 def _is_high_risk_path(path: str) -> bool:
     lowered = path.lower()
     lockfiles = (
@@ -588,6 +596,83 @@ def _is_high_risk_path(path: str) -> bool:
     if any(lowered.endswith(lockfile) for lockfile in lockfiles):
         return True
     return False
+
+
+def _lockfile_metadata_normalize(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _lockfile_metadata_normalize(subvalue) for key, subvalue in value.items() if key not in LOCKFILE_METADATA_ALLOWED_KEYS}
+    if isinstance(value, list):
+        return [_lockfile_metadata_normalize(item) for item in value]
+    return value
+
+
+def _lockfile_metadata_only_payload(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    return _lockfile_metadata_normalize(before) == _lockfile_metadata_normalize(after)
+
+
+def _lockfile_metadata_only_details(root: Path, commit: str, *, files: Sequence[str] | None = None) -> dict[str, Any] | None:
+    try:
+        resolved_files = list(files) if files is not None else _commit_files(root, commit)
+    except (FileNotFoundError, GitCommandError, subprocess.SubprocessError):
+        return None
+    if resolved_files != [LOCKFILE_METADATA_ONLY_PATH]:
+        return None
+
+    try:
+        previous_blob = _git_optional_output(["show", f"{commit}^:{LOCKFILE_METADATA_ONLY_PATH}"], cwd=root)
+        current_blob = _git_optional_output(["show", f"{commit}:{LOCKFILE_METADATA_ONLY_PATH}"], cwd=root)
+    except (FileNotFoundError, GitCommandError, subprocess.SubprocessError):
+        return None
+    if not previous_blob or not current_blob:
+        return None
+
+    try:
+        previous_lockfile = json.loads(previous_blob)
+        current_lockfile = json.loads(current_blob)
+    except json.JSONDecodeError:
+        return None
+
+    if not _lockfile_metadata_only_payload(previous_lockfile, current_lockfile):
+        return None
+
+    validation_checks = [
+        "web/package-lock.json only",
+        "no web/package.json change",
+        "no version/resolved/integrity/dependency-graph changes",
+        "metadata limited to peer flags",
+    ]
+    return {
+        "commit": commit,
+        "files": resolved_files,
+        "validation": {"status": "passed", "checks": validation_checks},
+    }
+
+
+def _lockfile_metadata_only_commits(root: Path, commits: Sequence[str]) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for commit in commits:
+        detail = _lockfile_metadata_only_details(root, commit)
+        if not detail:
+            return []
+        details.append(detail)
+    return details
+
+
+def _lockfile_metadata_only_report_fields(details: Sequence[dict[str, Any]] | None) -> dict[str, Any]:
+    if not details:
+        return {
+            "lockfile_metadata_only": False,
+            "lockfile_metadata_commit": None,
+            "lockfile_metadata_files": [],
+            "lockfile_metadata_validation": {"status": "not-needed", "checks": []},
+        }
+    first = details[0]
+    return {
+        "lockfile_metadata_only": True,
+        "lockfile_metadata_commit": first["commit"],
+        "lockfile_metadata_files": list(first["files"]),
+        "lockfile_metadata_validation": dict(first["validation"]),
+    }
 
 
 def _has_material_change(report: dict[str, Any]) -> bool:
@@ -645,6 +730,8 @@ def _classify_upstream_batch_risk(root: Path, commits: Sequence[str]) -> str:
     files = _batch_changed_files(root, commits)
     if not files:
         return "low"
+    if _lockfile_metadata_only_commits(root, commits):
+        return "low"
     if any(_is_high_risk_path(path) for path in files):
         return "high"
     if all(_is_low_risk_path(path) for path in files):
@@ -664,6 +751,8 @@ def _integration_risk_level(report: dict[str, Any]) -> str:
 
 
 def _classify_pr_risk(report: dict[str, Any]) -> str:
+    if report.get("lockfile_metadata_only"):
+        return "low"
     if not _has_material_change(report):
         return "low"
     files = _publication_files(report)
@@ -687,19 +776,25 @@ def _ensure_fork_safe_publication(root: Path) -> None:
         raise SystemExit("✗ missing origin push URL")
 
 
+def _run_validation_commands(root: Path, commands: Sequence[str]) -> dict[str, Any]:
+    checks: list[str] = []
+    for command in commands:
+        result = subprocess.run(command, cwd=str(root), shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return {"status": "failed", "checks": checks, "failed_command": command}
+        checks.append(command)
+    return {"status": "passed", "checks": checks, "failed_command": None}
+
+
 def _validation_checks(root: Path) -> list[str]:
     checks = [
         "./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q",
         "hermes doctor",
         "hermes --version",
     ]
-    for command in checks:
-        if command.startswith("./venv/bin/python"):
-            result = subprocess.run(command.split(), cwd=str(root), capture_output=True, text=True)
-        else:
-            result = subprocess.run(command.split(), cwd=str(root), capture_output=True, text=True)
-        if result.returncode != 0:
-            raise SystemExit(f"✗ validation failed: {command}")
+    result = _run_validation_commands(root, checks)
+    if result["status"] != "passed":
+        raise SystemExit(f"✗ validation failed: {result['failed_command']}")
     return checks
 
 
@@ -709,6 +804,10 @@ def _report_publication_state(report: dict[str, Any]) -> dict[str, Any]:
     derived.setdefault("risk_level", _classify_pr_risk(report))
     derived.setdefault("integration_blockers", _integration_blockers(report))
     derived.setdefault("integration_risk_level", _integration_risk_level(report))
+    derived.setdefault("lockfile_metadata_only", False)
+    derived.setdefault("lockfile_metadata_commit", None)
+    derived.setdefault("lockfile_metadata_files", [])
+    derived.setdefault("lockfile_metadata_validation", {"status": "not-needed", "checks": []})
     if derived["integration_risk_level"] == "high":
         derived["integration_status"] = "blocked-high-risk"
         derived["pr_status"] = "not-created-risk"
@@ -825,6 +924,14 @@ def _publish_run_artifacts(
     pr_url, _ = _create_pr(root, branch_name=branch_name, title="Add one-command PR and low-risk merge flow to Update Doctor", body="Update Doctor publication flow.")
     published["pr_url"] = pr_url
 
+    if request_auto_merge_low_risk and published.get("lockfile_metadata_only"):
+        metadata_validation = _run_validation_commands(root, LOCKFILE_METADATA_VALIDATION_COMMANDS)
+        published["lockfile_metadata_validation"] = metadata_validation
+        if metadata_validation["status"] != "passed":
+            published["merge_status"] = "blocked"
+            published["next_step"] = f"PR created, but lockfile metadata validation failed: {metadata_validation['failed_command']}"
+            return published
+
     if not request_auto_merge_low_risk:
         return published
 
@@ -868,6 +975,8 @@ def _process_upstream_batch(
     effective_commits = _uncovered_commits(batch_commits)
     batch_files = _batch_changed_files(root, effective_commits or batch_commits)
     batch_risk = _classify_upstream_batch_risk(root, effective_commits)
+    metadata_details = _lockfile_metadata_only_commits(root, effective_commits)
+    metadata_fields = _lockfile_metadata_only_report_fields(metadata_details)
     batch_label = f"{batch['index']:02d}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
     branch_name = f"update-doctor-batch-upstream-{batch_label}"
     worktree_parent = Path(tempfile.mkdtemp(prefix="hermes-update-doctor-batch-"))
@@ -892,6 +1001,7 @@ def _process_upstream_batch(
                 "coverage_used": bool(batch_covered_commits),
                 "covered_upstream_commits": [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS],
                 "covered_upstream_count": len(COVERED_UPSTREAM_COMMITS),
+                **metadata_fields,
             }
 
         for commit in effective_commits:
@@ -919,6 +1029,7 @@ def _process_upstream_batch(
                     "coverage_used": bool(batch_covered_commits),
                     "covered_upstream_commits": [_coverage_record(commit) for commit in COVERED_UPSTREAM_COMMITS],
                     "covered_upstream_count": len(COVERED_UPSTREAM_COMMITS),
+                    **metadata_fields,
                 }
 
         batch_report = dict(report)
@@ -938,6 +1049,7 @@ def _process_upstream_batch(
             "changed_files": batch_files,
         }
         batch_report["verification"] = {"origin_untouched": True, "main_untouched": True}
+        batch_report.update(metadata_fields)
 
         published = _publish_run_artifacts(
             batch_report,
@@ -995,6 +1107,10 @@ def _process_upstream_batch_with_fallback(
     result.setdefault("fallback_blocked_commit", None)
     result.setdefault("fallback_blocked_files", [])
     result.setdefault("fallback_blocked_reason", None)
+    result.setdefault("lockfile_metadata_only", result.get("lockfile_metadata_only", False))
+    result.setdefault("lockfile_metadata_commit", result.get("lockfile_metadata_commit"))
+    result.setdefault("lockfile_metadata_files", result.get("lockfile_metadata_files", []))
+    result.setdefault("lockfile_metadata_validation", result.get("lockfile_metadata_validation", {"status": "not-needed", "checks": []}))
     result["batch_files"] = batch_files
     result["batch_risk"] = batch_risk
     return result

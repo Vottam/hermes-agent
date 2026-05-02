@@ -9,6 +9,7 @@ import yaml
 
 from hermes_cli.update_doctor import (
     ConflictBucket,
+    LOCKFILE_METADATA_VALIDATION_COMMANDS,
     classify_conflict,
     main as doctor_main,
     render_report,
@@ -16,6 +17,8 @@ from hermes_cli.update_doctor import (
     _classify_pr_risk,
     _classify_upstream_batch_risk,
     _fallback_batch_to_individual_commits,
+    _lockfile_metadata_only_details,
+    _lockfile_metadata_only_payload,
     _plan_upstream_batches,
     _prepare_medium_web_sandbox,
     _publish_run_artifacts,
@@ -587,6 +590,118 @@ def test_publish_artifacts_merges_low_risk_pr(monkeypatch) -> None:
     assert published["action_taken"] == "pr-created-and-merged"
 
 
+def test_lockfile_metadata_only_payload_allows_peer_only_changes() -> None:
+    before = {
+        "lockfileVersion": 3,
+        "packages": {
+            "": {"name": "web", "version": "1.0.0"},
+            "node_modules/example": {
+                "version": "2.0.0",
+                "resolved": "https://registry.npmjs.org/example/-/example-2.0.0.tgz",
+                "integrity": "sha512-before",
+            },
+        },
+    }
+    after = json.loads(json.dumps(before))
+    after["packages"][""]["peer"] = True
+    after["packages"]["node_modules/example"]["peer"] = True
+
+    assert _lockfile_metadata_only_payload(before, after)
+
+
+def test_lockfile_metadata_only_payload_rejects_resolved_change() -> None:
+    before = {
+        "packages": {
+            "": {"name": "web", "version": "1.0.0"},
+            "node_modules/example": {
+                "version": "2.0.0",
+                "resolved": "https://registry.npmjs.org/example/-/example-2.0.0.tgz",
+                "integrity": "sha512-before",
+            },
+        },
+    }
+    after = json.loads(json.dumps(before))
+    after["packages"]["node_modules/example"]["resolved"] = "https://registry.npmjs.org/example/-/example-2.0.1.tgz"
+
+    assert not _lockfile_metadata_only_payload(before, after)
+
+
+def test_lockfile_metadata_only_payload_rejects_integrity_change() -> None:
+    before = {
+        "packages": {
+            "": {"name": "web", "version": "1.0.0"},
+            "node_modules/example": {
+                "version": "2.0.0",
+                "resolved": "https://registry.npmjs.org/example/-/example-2.0.0.tgz",
+                "integrity": "sha512-before",
+            },
+        },
+    }
+    after = json.loads(json.dumps(before))
+    after["packages"]["node_modules/example"]["integrity"] = "sha512-after"
+
+    assert not _lockfile_metadata_only_payload(before, after)
+
+
+def test_lockfile_metadata_only_details_rejects_package_json_change(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._commit_files",
+        lambda *args, **kwargs: ["web/package-lock.json", "web/package.json"],
+    )
+
+    assert _lockfile_metadata_only_details(REPO_ROOT, "deadbeef") is None
+
+
+def test_classify_upstream_batch_risk_treats_9b62_lockfile_metadata_only_as_low() -> None:
+    assert _classify_upstream_batch_risk(REPO_ROOT, ["9b62c98170c481c8a45fe828ef01c65964c0cf01"]) == "low"
+
+
+def test_publish_artifacts_merges_lockfile_metadata_only_pr(monkeypatch) -> None:
+    report = _sample_report()
+    report["environment"]["behind"] = 19
+    report["environment"]["origin_ahead_count"] = 19
+    report["repair"] = {
+        "mode": "repair",
+        "result": "changed",
+        "bucket": "test-desync",
+        "repair_status": "applied",
+        "repair_action": "patch-applied",
+        "safety_level": "safe",
+        "next_step": "done",
+        "changed_files": ["web/package-lock.json"],
+    }
+    report["lockfile_metadata_only"] = True
+    report["lockfile_metadata_commit"] = "9b62c98170c481c8a45fe828ef01c65964c0cf01"
+    report["lockfile_metadata_files"] = ["web/package-lock.json"]
+    report["lockfile_metadata_validation"] = {"status": "passed", "checks": ["web/package-lock.json only"]}
+
+    monkeypatch.setattr("hermes_cli.update_doctor._ensure_fork_safe_publication", lambda *args, **kwargs: None)
+    monkeypatch.setattr("hermes_cli.update_doctor._create_pr", lambda *args, **kwargs: ("https://github.com/Vottam/hermes-agent/pull/199", 199))
+    monkeypatch.setattr(
+        "hermes_cli.update_doctor._review_pr_for_auto_merge",
+        lambda *args, **kwargs: {
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "autoMergeRequest": None,
+            "baseRefName": "main",
+            "headRefName": "update-doctor-pr-1",
+            "url": "https://github.com/Vottam/hermes-agent/pull/199",
+        },
+    )
+    monkeypatch.setattr("hermes_cli.update_doctor._merge_pr", lambda *args, **kwargs: "merge-commit-sha")
+    monkeypatch.setattr("hermes_cli.update_doctor._run_validation_commands", lambda *args, **kwargs: {"status": "passed", "checks": list(LOCKFILE_METADATA_VALIDATION_COMMANDS), "failed_command": None})
+    monkeypatch.setattr("hermes_cli.update_doctor._refresh_main_and_validate", lambda *args, **kwargs: ["./venv/bin/python -m pytest tests/hermes_cli/test_update_doctor.py -q", "hermes doctor", "hermes --version"])
+
+    published = _publish_run_artifacts(report, root=REPO_ROOT, request_pr=True, request_auto_merge_low_risk=True)
+
+    assert published["risk_level"] == "low"
+    assert published["lockfile_metadata_only"] is True
+    assert published["lockfile_metadata_commit"] == "9b62c98170c481c8a45fe828ef01c65964c0cf01"
+    assert published["lockfile_metadata_files"] == ["web/package-lock.json"]
+    assert published["lockfile_metadata_validation"]["status"] == "passed"
+    assert published["lockfile_metadata_validation"]["checks"] == list(LOCKFILE_METADATA_VALIDATION_COMMANDS)
+    assert published["merge_status"] == "merged"
+    assert published["merge_commit"] == "merge-commit-sha"
 def test_batch_upstream_flag_requires_run() -> None:
     with pytest.raises(SystemExit):
         doctor_main(["--batch-upstream", "--format", "json"])
