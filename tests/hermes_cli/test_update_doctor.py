@@ -123,6 +123,19 @@ def _sample_report(*, repair: dict | None = None, replay_result: str = "conflict
     return report
 
 
+def _with_update_failure_classification(report: dict) -> dict:
+    derived = dict(report)
+    if derived.get("integration_status") in {"blocked-high-risk", "blocked-batch-risk"} or derived.get("run_status") == "blocked" or derived.get("final_status") == "blocked":
+        derived["update_failure_classification"] = "out_of_scope"
+    elif derived.get("medium_tested_status") == "baseline-failure":
+        derived["update_failure_classification"] = "baseline_known"
+    elif derived.get("medium_tested_status") == "failed":
+        derived["update_failure_classification"] = "likely_regression"
+    else:
+        derived["update_failure_classification"] = "inconclusive"
+    return derived
+
+
 def test_formal_buckets_are_stable_and_unique() -> None:
     values = [bucket.value for bucket in ConflictBucket]
     assert len(values) == len(set(values))
@@ -197,14 +210,16 @@ def test_render_report_json_and_yaml_round_trip() -> None:
     json_text = render_report(report, "json")
     yaml_text = render_report(report, "yaml")
 
-    assert json.loads(json_text) == report
-    assert yaml.safe_load(yaml_text) == report
+    expected = _with_update_failure_classification(report)
+    assert json.loads(json_text) == expected
+    assert yaml.safe_load(yaml_text) == expected
     assert json.loads(json_text)["replay"]["skipped_duplicate_commits"][0]["bucket"] == "patch-id-duplicate"
     assert json.loads(json_text)["replay"]["skipped_safe_commits"][0]["bucket"] == "already-covered-in-fork-main"
     assert json.loads(json_text)["environment"]["origin_ahead_count"] == 99
     assert json.loads(json_text)["covered_upstream_commits"][0]["upstream_commit"] == "1745cfc6d73b69506118526760eb67456e1ef422"
     assert json.loads(json_text)["covered_upstream_count"] == 1
     assert json.loads(json_text)["coverage_used"] is False
+    assert expected["update_failure_classification"] == "inconclusive"
 
 
 def test_render_report_repair_round_trip() -> None:
@@ -223,9 +238,11 @@ def test_render_report_repair_round_trip() -> None:
     json_text = render_report(report, "json")
     yaml_text = render_report(report, "yaml")
 
-    assert json.loads(json_text) == report
-    assert yaml.safe_load(yaml_text) == report
+    expected = _with_update_failure_classification(report)
+    assert json.loads(json_text) == expected
+    assert yaml.safe_load(yaml_text) == expected
     assert json.loads(json_text)["repair"]["repair_status"] == "skip-safe"
+    assert expected["update_failure_classification"] == "inconclusive"
 
 
 def test_render_report_run_round_trip() -> None:
@@ -251,9 +268,11 @@ def test_render_report_run_round_trip() -> None:
     json_text = render_report(report, "json")
     yaml_text = render_report(report, "yaml")
 
-    assert json.loads(json_text) == report
-    assert yaml.safe_load(yaml_text) == report
+    expected = _with_update_failure_classification(report)
+    assert json.loads(json_text) == expected
+    assert yaml.safe_load(yaml_text) == expected
     assert json.loads(json_text)["run_status"] == "clean"
+    assert expected["update_failure_classification"] == "inconclusive"
 
 
 def test_batch_upstream_run_skips_explicitly_covered_high_risk_commit(monkeypatch) -> None:
@@ -517,6 +536,47 @@ def test_pr_and_auto_merge_noop_path_does_not_create_pr(monkeypatch, capsys) -> 
     assert rendered["merge_status"] == "not-needed"
     assert rendered["pr_url"] is None
     assert rendered["origin_ahead_count"] == 99
+
+
+def test_render_report_classifies_baseline_failure_as_known() -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["medium_tested_status"] = "baseline-failure"
+    report["medium_baseline_failure_matched"] = True
+
+    rendered = json.loads(render_report(report, "json"))
+
+    assert rendered["update_failure_classification"] == "baseline_known"
+
+
+def test_render_report_classifies_failed_medium_test_as_likely_regression() -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["medium_tested_status"] = "failed"
+    report["medium_baseline_failure_matched"] = False
+
+    rendered = json.loads(render_report(report, "json"))
+
+    assert rendered["update_failure_classification"] == "likely_regression"
+
+
+def test_render_report_classifies_blocked_high_risk_as_out_of_scope() -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["medium_tested_status"] = "failed"
+    report["run_status"] = "blocked"
+    report["integration_status"] = "blocked-high-risk"
+    report["final_status"] = "blocked"
+
+    rendered = json.loads(render_report(report, "json"))
+
+    assert rendered["update_failure_classification"] == "out_of_scope"
+
+
+def test_render_report_text_includes_update_failure_classification() -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["medium_tested_status"] = "failed"
+
+    rendered = render_report(report, "text")
+
+    assert "update failure classification: likely_regression" in rendered
 
 
 def test_classify_pr_risk_handles_low_and_high_paths() -> None:
