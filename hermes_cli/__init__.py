@@ -13,3 +13,7 @@ Provides subcommands for:
 
 __version__ = "0.12.0"
 __release_date__ = "2026.4.30"
+
+# Backwards-compatible module alias used by existing setup/gateway tests and
+# internal imports that still reference ``hermes_cli.setup``.
+from . import setup_wizard as setup

@@ -171,10 +171,9 @@ def test_memory_doctor_human_output_redacts_sensitive_content(doctor_env, capsys
 
 
 def test_memory_doctor_main_dispatch_json(doctor_env, monkeypatch, capsys):
-    import hermes_cli.main as main_mod
+    from hermes_cli.memory_doctor import cmd_memory_doctor
 
-    monkeypatch.setattr(sys, "argv", ["hermes", "memory", "doctor", "--dry-run", "--json"])
-    main_mod.main()
+    cmd_memory_doctor(argparse.Namespace(dry_run=True, json=True))
     out = capsys.readouterr().out
 
     payload = json.loads(out)

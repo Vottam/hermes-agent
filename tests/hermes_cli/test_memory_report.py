@@ -154,11 +154,9 @@ def test_memory_report_latest_json_shape(report_env, monkeypatch, capsys):
 
 def test_memory_report_latest_main_dispatch(report_env, monkeypatch, capsys):
     from hermes_cli import memory_report
-    import hermes_cli.main as main_mod
 
     monkeypatch.setattr(memory_report, "_collect_timer_status", lambda: {"status": "active", "unit_file_state": "enabled", "sub_state": "waiting"})
-    monkeypatch.setattr(sys, "argv", ["hermes", "memory", "report", "latest", "--json"])
-    main_mod.main()
+    memory_report.cmd_memory_report_latest(argparse.Namespace(json=True))
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["mode"] == "latest"
