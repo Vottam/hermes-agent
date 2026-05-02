@@ -7126,6 +7126,16 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print(f"→ Found {commit_count} new commit(s)")
 
+        # Snapshot the git state before mutating the tree so we can produce a
+        # rescue ref and, if needed, replay local commits after the pull.
+        try:
+            update_snapshot = collect_update_snapshot(git_cmd, PROJECT_ROOT)
+            rescue_ref = create_update_rescue_ref(git_cmd, PROJECT_ROOT, update_snapshot)
+        except Exception as exc:
+            logger.debug("Update replay snapshot failed: %s", exc)
+            update_snapshot = None
+            rescue_ref = None
+
         # Snapshot critical state (state.db, config, pairing JSONs, etc.)
         # before pulling so a user can recover if something goes wrong.
         # Issue #15733 reported missing pairing data after an update; even
@@ -7190,6 +7200,26 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         prompt_user=prompt_for_restore,
                         input_fn=gw_input_fn,
                     )
+
+        if update_snapshot is not None:
+            replay_result = replay_missing_update_commits(
+                git_cmd,
+                PROJECT_ROOT,
+                update_snapshot,
+                rescue_ref,
+            )
+            if not replay_result.succeeded:
+                report = _collect_update_final_report(
+                    git_cmd,
+                    PROJECT_ROOT,
+                    update_snapshot,
+                    rescue_ref,
+                    replay_result,
+                    auto_stash_ref,
+                    "not reached",
+                )
+                _print_update_final_report(report)
+                sys.exit(1)
 
         _invalidate_update_cache()
 

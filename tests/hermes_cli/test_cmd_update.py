@@ -124,10 +124,9 @@ class TestCmdUpdateBranchFallback:
             if call.args and call.args[0][0] == "/usr/bin/npm"
         ]
 
-        # cmd_update runs npm commands in three locations:
-        #   1. repo root  — slash-command / TUI bridge deps
-        #   2. ui-tui/    — Ink TUI deps
-        #   3. web/       — web UI frontend deps + build
+        # cmd_update always refreshes the repo root and ui-tui node deps.
+        # The web UI build is conditional and may be skipped when the build
+        # outputs are already current, so only assert the mandatory calls here.
         full_flags = [
             "/usr/bin/npm",
             "ci",
@@ -136,12 +135,13 @@ class TestCmdUpdateBranchFallback:
             "--no-audit",
             "--progress=false",
         ]
-        assert npm_calls == [
+        assert npm_calls[:2] == [
             (full_flags, PROJECT_ROOT),
             (full_flags, PROJECT_ROOT / "ui-tui"),
-            (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
-            (["/usr/bin/npm", "run", "build"], PROJECT_ROOT / "web"),
         ]
+        for call in npm_calls[2:]:
+            assert call[1] == PROJECT_ROOT / "web"
+            assert call[0][:2] in (["/usr/bin/npm", "ci"], ["/usr/bin/npm", "run"])
 
     def test_update_non_interactive_skips_migration_prompt(self, mock_args, capsys):
         """When stdin/stdout aren't TTYs, config migration prompt is skipped."""
@@ -233,6 +233,10 @@ def test_update_replay_failure_stops_before_post_update_side_effects(
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="1\n", stderr="")
         if cmd == ["git", "pull", "--ff-only", "origin", "main"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd == ["/opt/hermes-agent/venv/bin/python", "-m", "pip", "--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="pip 24.0\n", stderr="")
+        if cmd == ["ps", "-A", "-o", "pid=,command="]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         raise AssertionError(f"unexpected command: {cmd}")
 
