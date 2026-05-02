@@ -49,8 +49,9 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Sequence
 
 def _add_accept_hooks_flag(parser) -> None:
     """Attach the ``--accept-hooks`` flag.  Shared across every agent
@@ -218,7 +219,7 @@ except Exception:
 
 import logging
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from hermes_cli import __version__, __release_date__
 from hermes_constants import AI_GATEWAY_BASE_URL, OPENROUTER_BASE_URL
@@ -5900,6 +5901,253 @@ def _restore_stashed_changes(
     print("⚠ Local changes were restored on top of the updated codebase.")
     print("  Review `git diff` / `git status` if Hermes behaves unexpectedly.")
     return True
+
+
+# -------------------------------------------------------------------------
+# Update compatibility layer
+# -------------------------------------------------------------------------
+
+@dataclass(slots=True)
+class UpdateSnapshot:
+    head_before: str
+    branch_before: str
+    upstream_ref: str
+    upstream_head_before: str
+    status_short: str
+    ahead_commits: list[str]
+    ahead_count: int
+    dirty_tree: bool
+
+
+@dataclass(slots=True)
+class UpdateReplayResult:
+    skipped_commits: list[str]
+    replayed_commits: list[str]
+    conflicted_commit: str | None
+    succeeded: bool
+
+
+def collect_update_snapshot(git_cmd: Sequence[str], cwd: Path) -> UpdateSnapshot:
+    """Collect the minimal git state needed by the legacy update tests.
+
+    The live update flow uses an inline implementation, but the compatibility
+    layer keeps the historical symbols available for existing callers/tests.
+    """
+    branch_result = subprocess.run(
+        list(git_cmd) + ["rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if branch_result.returncode != 0:
+        return UpdateSnapshot("", "HEAD", "origin/main", "", "", [], 0, False)
+
+    head_result = subprocess.run(
+        list(git_cmd) + ["rev-parse", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    upstream_result = subprocess.run(
+        list(git_cmd) + ["rev-parse", "origin/main"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    status_result = subprocess.run(
+        list(git_cmd) + ["status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    ahead_result = subprocess.run(
+        list(git_cmd) + ["rev-list", "--reverse", "origin/main..HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+
+    head_before = head_result.stdout.strip() if head_result.returncode == 0 else ""
+    upstream_head_before = (
+        upstream_result.stdout.strip() if upstream_result.returncode == 0 else ""
+    )
+    status_short = "\n".join(
+        line for line in (line.strip() for line in status_result.stdout.splitlines()) if line
+    ) if status_result.returncode == 0 else ""
+    ahead_commits = [
+        line for line in (line.strip() for line in ahead_result.stdout.splitlines()) if line
+    ] if ahead_result.returncode == 0 else []
+
+    return UpdateSnapshot(
+        head_before=head_before,
+        branch_before=branch_result.stdout.strip() or "HEAD",
+        upstream_ref="origin/main",
+        upstream_head_before=upstream_head_before,
+        status_short=status_short,
+        ahead_commits=ahead_commits,
+        ahead_count=len(ahead_commits),
+        dirty_tree=bool(status_short),
+    )
+
+
+def create_update_rescue_ref(
+    git_cmd: Sequence[str],
+    cwd: Path,
+    snapshot: UpdateSnapshot,
+    prefix: str = "refs/hermes/update-rescue",
+) -> str | None:
+    if not snapshot.ahead_commits:
+        return None
+    suffix = snapshot.head_before[:8] if snapshot.head_before else "unknown"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ref = f"{prefix}/{stamp}-{suffix}"
+    result = subprocess.run(
+        list(git_cmd) + ["update-ref", ref, snapshot.head_before],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return ref
+
+
+def _update_commit_patch_id(git_cmd: Sequence[str], cwd: Path, commit: str) -> str | None:
+    show = subprocess.run(
+        list(git_cmd) + ["show", commit, "--format=medium", "--no-ext-diff", "--no-color"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if show.returncode != 0:
+        return None
+    patch = subprocess.run(
+        list(git_cmd) + ["patch-id", "--stable"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        input=show.stdout,
+    )
+    if patch.returncode != 0:
+        return None
+    line = patch.stdout.strip().splitlines()
+    if not line:
+        return None
+    return line[0].split()[0]
+
+
+def replay_missing_update_commits(
+    git_cmd: Sequence[str],
+    cwd: Path,
+    snapshot: UpdateSnapshot,
+    rescue_ref: str | None,
+) -> UpdateReplayResult:
+    if not rescue_ref:
+        return UpdateReplayResult([], [], None, True)
+
+    cherry = subprocess.run(
+        list(git_cmd) + ["cherry", snapshot.upstream_ref, rescue_ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if cherry.returncode != 0:
+        return UpdateReplayResult([], [], None, False)
+
+    plus_commits: set[str] = set()
+    for line in cherry.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("+"):
+            parts = line.split()
+            if len(parts) >= 2:
+                plus_commits.add(parts[1])
+
+    skipped_commits: list[str] = []
+    replayed_commits: list[str] = []
+    seen_patch_ids: set[str] = set()
+
+    for commit in snapshot.ahead_commits:
+        if commit not in plus_commits:
+            skipped_commits.append(commit)
+            continue
+
+        patch_id = _update_commit_patch_id(git_cmd, cwd, commit)
+        if patch_id and patch_id in seen_patch_ids:
+            skipped_commits.append(commit)
+            continue
+        if patch_id:
+            seen_patch_ids.add(patch_id)
+
+        pick = subprocess.run(
+            list(git_cmd) + ["cherry-pick", commit],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if pick.returncode != 0:
+            subprocess.run(
+                list(git_cmd) + ["cherry-pick", "--abort"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+            )
+            return UpdateReplayResult(skipped_commits, replayed_commits, commit, False)
+        replayed_commits.append(commit)
+
+    return UpdateReplayResult(skipped_commits, replayed_commits, None, True)
+
+
+def _collect_update_final_report(
+    git_cmd: Sequence[str],
+    cwd: Path,
+    snapshot: UpdateSnapshot,
+    rescue_ref: str | None,
+    replay_result: UpdateReplayResult,
+    autostash_ref: str | None,
+    gateway_service_health: str,
+) -> dict[str, object]:
+    head_result = subprocess.run(
+        list(git_cmd) + ["rev-parse", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    status_result = subprocess.run(
+        list(git_cmd) + ["status", "--short", "--branch"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "old_head": snapshot.head_before,
+        "new_head": head_result.stdout.strip() if head_result.returncode == 0 else "",
+        "target_ref": snapshot.upstream_ref,
+        "rescue_ref": rescue_ref,
+        "local_commits_preserved": list(snapshot.ahead_commits),
+        "local_commits_skipped": list(replay_result.skipped_commits),
+        "local_commits_replayed": list(replay_result.replayed_commits),
+        "replay_conflict_commit": replay_result.conflicted_commit,
+        "autostash_ref_preserved": autostash_ref,
+        "final_git_status": status_result.stdout.strip() if status_result.returncode == 0 else "",
+        "gateway_service_health": gateway_service_health,
+    }
+
+
+def _print_update_final_report(report: dict[str, object]) -> None:
+    print("Update report")
+    print(f"Old HEAD: {report.get('old_head', '')}")
+    print(f"New HEAD: {report.get('new_head', '')}")
+    print(f"Target ref: {report.get('target_ref', '')}")
+    print(f"Rescue ref: {report.get('rescue_ref', '')}")
+    print(f"Local commits preserved: {report.get('local_commits_preserved', [])}")
+    print(
+        f"Local commits skipped as upstream-equivalent: {report.get('local_commits_skipped', [])}"
+    )
+    print(f"Local commits replayed: {report.get('local_commits_replayed', [])}")
+    print(f"Replay conflict commit: {report.get('replay_conflict_commit', None)}")
+    print(f"Autostash ref preserved: {report.get('autostash_ref_preserved', None)}")
+    print(f"Final git status: {report.get('final_git_status', '')}")
+    print(f"Gateway/service health: {report.get('gateway_service_health', '')}")
 
 
 # =========================================================================
