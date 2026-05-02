@@ -116,6 +116,8 @@ class TestWebServerEndpoints:
 
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        yield
+        self.client.close()
 
     def test_get_status(self):
         resp = self.client.get("/api/status")
@@ -430,6 +432,8 @@ class TestConfigRoundTrip:
         from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        yield
+        self.client.close()
 
     def test_get_config_no_internal_keys(self):
         """GET /api/config should not expose _config_version or _model_meta."""
@@ -1168,6 +1172,8 @@ class TestModelInfoEndpoint:
             pytest.skip("fastapi/starlette not installed")
         from hermes_cli.web_server import app
         self.client = TestClient(app)
+        yield
+        self.client.close()
 
     def test_model_info_returns_200(self):
         resp = self.client.get("/api/model/info")
