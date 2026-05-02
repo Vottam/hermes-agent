@@ -5791,7 +5791,7 @@ def _print_stash_cleanup_guidance(
         print(f"  Remove it with: git stash drop {stash_selector}")
     else:
         print(
-            f"  Look for commit {stash_ref}, then drop its selector with: git stash drop stash@{{N}}"
+            f"  Look for commit {stash_ref}, then drop its selector with: git stash drop <stash@{{N}}>"
         )
 
 
@@ -5869,37 +5869,11 @@ def _restore_stashed_changes(
         # skill sync, and gateway restart.
         return False
 
-    stash_selector = _resolve_stash_selector(git_cmd, cwd, stash_ref)
-    if stash_selector is None:
-        print(
-            "⚠ Local changes were restored, but Hermes couldn't find the stash entry to drop."
-        )
-        print(
-            "  The stash was left in place. You can remove it manually after checking the result."
-        )
-        _print_stash_cleanup_guidance(stash_ref)
-    else:
-        drop = subprocess.run(
-            git_cmd + ["stash", "drop", stash_selector],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-        )
-        if drop.returncode != 0:
-            print(
-                "⚠ Local changes were restored, but Hermes couldn't drop the saved stash entry."
-            )
-            if drop.stdout.strip():
-                print(drop.stdout.strip())
-            if drop.stderr.strip():
-                print(drop.stderr.strip())
-            print(
-                "  The stash was left in place. You can remove it manually after checking the result."
-            )
-            _print_stash_cleanup_guidance(stash_ref, stash_selector)
-
     print("⚠ Local changes were restored on top of the updated codebase.")
+    print("  The autostash entry was preserved for manual cleanup later.")
+    print(f"  Stash ref: {stash_ref}")
     print("  Review `git diff` / `git status` if Hermes behaves unexpectedly.")
+    _print_stash_cleanup_guidance(stash_ref)
     return True
 
 
@@ -7104,7 +7078,20 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         if commit_count == 0:
             _invalidate_update_cache()
-            # Restore stash and switch back to original branch if we moved
+            # Restore the original branch first, then reapply the saved stash.
+            if current_branch not in ("main", "HEAD"):
+                restore_branch = subprocess.run(
+                    git_cmd + ["checkout", current_branch],
+                    cwd=PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if restore_branch.returncode != 0:
+                    print(f"✗ failed to restore original branch '{current_branch}'.")
+                    if restore_branch.stderr.strip():
+                        print(f"  {restore_branch.stderr.strip()}")
+                    sys.exit(1)
             if auto_stash_ref is not None:
                 _restore_stashed_changes(
                     git_cmd,
@@ -7112,14 +7099,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     auto_stash_ref,
                     prompt_user=prompt_for_restore,
                     input_fn=gw_input_fn,
-                )
-            if current_branch not in ("main", "HEAD"):
-                subprocess.run(
-                    git_cmd + ["checkout", current_branch],
-                    cwd=PROJECT_ROOT,
-                    capture_output=True,
-                    text=True,
-                    check=False,
                 )
             print("✓ Already up to date!")
             return
@@ -7184,22 +7163,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     sys.exit(1)
             update_succeeded = True
         finally:
-            if auto_stash_ref is not None:
+            if auto_stash_ref is not None and not update_succeeded:
                 # Don't attempt stash restore if the code update itself failed —
                 # working tree is in an unknown state.
-                if not update_succeeded:
-                    print(
-                        f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
-                    )
-                    print(f"  Restore manually with: git stash apply")
-                else:
-                    _restore_stashed_changes(
-                        git_cmd,
-                        PROJECT_ROOT,
-                        auto_stash_ref,
-                        prompt_user=prompt_for_restore,
-                        input_fn=gw_input_fn,
-                    )
+                print(
+                    f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
+                )
+                print(f"  Restore manually with: git stash apply")
 
         if update_snapshot is not None:
             replay_result = replay_missing_update_commits(
@@ -7220,6 +7190,29 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 )
                 _print_update_final_report(report)
                 sys.exit(1)
+
+        if current_branch not in ("main", "HEAD"):
+            restore_branch = subprocess.run(
+                git_cmd + ["checkout", current_branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if restore_branch.returncode != 0:
+                print(f"✗ failed to restore original branch '{current_branch}'.")
+                if restore_branch.stderr.strip():
+                    print(f"  {restore_branch.stderr.strip()}")
+                sys.exit(1)
+
+        if auto_stash_ref is not None:
+            _restore_stashed_changes(
+                git_cmd,
+                PROJECT_ROOT,
+                auto_stash_ref,
+                prompt_user=prompt_for_restore,
+                input_fn=gw_input_fn,
+            )
 
         _invalidate_update_cache()
 
