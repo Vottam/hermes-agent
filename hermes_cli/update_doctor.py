@@ -855,6 +855,81 @@ def _update_failure_classification(report: dict[str, Any]) -> str:
 
 _FAILURE_PATH_RE = re.compile(r"(tests/[^\s()]+)")
 
+_KNOWN_BASELINE_FAILURE_PATTERNS: tuple[dict[str, str], ...] = (
+    {
+        "id": "cli_busy_input_mode",
+        "family": "cli_acp",
+        "pattern": "tests/cli/test_busy_input_mode_command.py",
+        "reason": "known baseline mismatch in busy-input mode command coverage",
+    },
+    {
+        "id": "acp_server_available_commands",
+        "family": "cli_acp",
+        "pattern": "tests/acp/test_server.py",
+        "reason": "known baseline mismatch in ACP session command list",
+    },
+    {
+        "id": "agent_redact",
+        "family": "redaction",
+        "pattern": "tests/agent/test_redact.py",
+        "reason": "known baseline mismatch in redaction coverage",
+    },
+    {
+        "id": "memory_holographic_redaction",
+        "family": "redaction",
+        "pattern": "tests/plugins/memory/test_holographic_redaction.py",
+        "reason": "known baseline mismatch in memory redaction coverage",
+    },
+    {
+        "id": "gateway_teams_send",
+        "family": "gateway",
+        "pattern": "tests/gateway/test_teams.py",
+        "reason": "known baseline mismatch in Teams gateway send path",
+    },
+    {
+        "id": "gateway_service",
+        "family": "gateway",
+        "pattern": "tests/hermes_cli/test_gateway_service.py",
+        "reason": "known baseline mismatch in gateway service unit generation",
+    },
+    {
+        "id": "docker_pid1_reaping",
+        "family": "docker_env",
+        "pattern": "tests/tools/test_dockerfile_pid1_reaping.py",
+        "reason": "known baseline mismatch in Dockerfile generation",
+    },
+    {
+        "id": "credential_pool_env_fallback",
+        "family": "docker_env",
+        "pattern": "tests/tools/test_credential_pool_env_fallback.py",
+        "reason": "known baseline mismatch in env fallback ordering",
+    },
+    {
+        "id": "tui_gateway_server",
+        "family": "web_tui_plugin",
+        "pattern": "tests/test_tui_gateway_server.py",
+        "reason": "known baseline mismatch in TUI gateway session handling",
+    },
+    {
+        "id": "kanban_dashboard_plugin",
+        "family": "web_tui_plugin",
+        "pattern": "tests/plugins/test_kanban_dashboard_plugin.py",
+        "reason": "known baseline mismatch in kanban plugin websocket auth",
+    },
+    {
+        "id": "run_agent_concurrent_interrupt",
+        "family": "run_agent",
+        "pattern": "tests/run_agent/test_concurrent_interrupt.py",
+        "reason": "known baseline mismatch in concurrent interrupt guardrails",
+    },
+    {
+        "id": "update_commit_replay_harness",
+        "family": "update",
+        "pattern": "tests/hermes_cli/test_update_commit_replay.py",
+        "reason": "CI harness mismatch; local focused replay tests pass",
+    },
+)
+
 
 def _classify_failure_family(path_or_failure: str) -> str:
     haystack = path_or_failure.lower()
@@ -887,10 +962,43 @@ def _update_failure_families(report: dict[str, Any]) -> dict[str, int]:
     return {family: counts[family] for family in sorted(counts) if counts[family]}
 
 
+def _known_baseline_matches(report: dict[str, Any]) -> list[dict[str, str]]:
+    failures = report.get("medium_test_failures") or report.get("test_failures") or []
+    matches: list[dict[str, str]] = []
+    for failure in failures:
+        failure_lower = str(failure).lower()
+        for pattern in _KNOWN_BASELINE_FAILURE_PATTERNS:
+            if pattern["pattern"] in failure_lower:
+                matches.append({**pattern, "failure": str(failure)})
+                break
+    return matches
+
+
+def _unknown_failure_families(report: dict[str, Any]) -> dict[str, int]:
+    failures = report.get("medium_test_failures") or report.get("test_failures") or []
+    known_failures = {match["failure"] for match in _known_baseline_matches(report)}
+    counts = Counter(_classify_failure_family(failure) for failure in failures if str(failure) not in known_failures)
+    return {family: counts[family] for family in sorted(counts) if counts[family]}
+
+
+def _baseline_allowlist_summary(report: dict[str, Any]) -> dict[str, int]:
+    failures = report.get("medium_test_failures") or report.get("test_failures") or []
+    known_matches = _known_baseline_matches(report)
+    unknown_failures = max(len(failures) - len(known_matches), 0)
+    return {
+        "total_failures": len(failures),
+        "known_baseline_matches": len(known_matches),
+        "unknown_failures": unknown_failures,
+    }
+
+
 def _with_update_failure_classification(report: dict[str, Any]) -> dict[str, Any]:
     derived = dict(report)
     derived.setdefault("update_failure_classification", _update_failure_classification(report))
     derived.setdefault("update_failure_families", _update_failure_families(report))
+    derived.setdefault("known_baseline_matches", _known_baseline_matches(report))
+    derived.setdefault("unknown_failure_families", _unknown_failure_families(report))
+    derived.setdefault("baseline_allowlist_summary", _baseline_allowlist_summary(report))
     return derived
 
 
@@ -1986,6 +2094,14 @@ def _build_text_report(report: dict[str, Any]) -> str:
     lines.append(f"  result: {replay['result']}")
     lines.append(f"  update failure classification: {report.get('update_failure_classification', 'inconclusive')}")
     lines.append(f"  update failure families: {_format_family_counts(report.get('update_failure_families') or {})}")
+    lines.append(f"  known baseline matches: {len(report.get('known_baseline_matches') or [])}")
+    lines.append(f"  unknown failure families: {_format_family_counts(report.get('unknown_failure_families') or {})}")
+    summary = report.get('baseline_allowlist_summary') or {}
+    lines.append(
+        "  baseline allowlist: "
+        f"matched={summary.get('known_baseline_matches', 0)} "
+        f"unmatched={summary.get('unknown_failures', 0)}"
+    )
     lines.append(f"  origin untouched: {str(report['verification']['origin_untouched']).lower()}")
     lines.append(f"  main untouched: {str(report['verification']['main_untouched']).lower()}")
     if "run_status" in report:

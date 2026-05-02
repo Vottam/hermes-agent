@@ -11,16 +11,19 @@ from hermes_cli.update_doctor import (
     ConflictBucket,
     LOCKFILE_METADATA_VALIDATION_COMMANDS,
     _batch_upstream_run,
+    _baseline_allowlist_summary,
     _classify_failure_family,
     _classify_pr_risk,
     _classify_upstream_batch_risk,
     _fallback_batch_to_individual_commits,
+    _known_baseline_matches,
     _lockfile_metadata_only_details,
     _lockfile_metadata_only_payload,
     _plan_upstream_batches,
     _prepare_medium_web_sandbox,
     _publish_run_artifacts,
     _run_medium_commit_sandbox_tests,
+    _unknown_failure_families,
     _update_failure_families,
     classify_conflict,
     main as doctor_main,
@@ -136,6 +139,9 @@ def _with_update_failure_classification(report: dict) -> dict:
     else:
         derived["update_failure_classification"] = "inconclusive"
     derived.setdefault("update_failure_families", _update_failure_families(report))
+    derived.setdefault("known_baseline_matches", _known_baseline_matches(report))
+    derived.setdefault("unknown_failure_families", _unknown_failure_families(report))
+    derived.setdefault("baseline_allowlist_summary", _baseline_allowlist_summary(report))
     return derived
 
 
@@ -580,6 +586,51 @@ def test_render_report_text_includes_update_failure_classification() -> None:
     rendered = render_report(report, "text")
 
     assert "update failure classification: likely_regression" in rendered
+
+
+def test_baseline_allowlist_fields_are_serialized_and_rendered() -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["medium_tested_status"] = "failed"
+    report["medium_test_failures"] = [
+        "pytest tests/cli/test_busy_input_mode_command.py -q (exit 1)",
+        "pytest tests/acp/test_server.py -q (exit 1)",
+        "pytest tests/hermes_cli/test_update_yes_flag.py -q (exit 1)",
+        "pytest tests/other/test_misc.py -q (exit 1)",
+    ]
+
+    rendered_json = json.loads(render_report(report, "json"))
+    rendered_yaml = yaml.safe_load(render_report(report, "yaml"))
+    rendered_text = render_report(report, "text")
+
+    assert rendered_json["medium_test_failures"] == report["medium_test_failures"]
+    assert rendered_json["known_baseline_matches"] == [
+        {
+            "id": "cli_busy_input_mode",
+            "family": "cli_acp",
+            "pattern": "tests/cli/test_busy_input_mode_command.py",
+            "reason": "known baseline mismatch in busy-input mode command coverage",
+            "failure": "pytest tests/cli/test_busy_input_mode_command.py -q (exit 1)",
+        },
+        {
+            "id": "acp_server_available_commands",
+            "family": "cli_acp",
+            "pattern": "tests/acp/test_server.py",
+            "reason": "known baseline mismatch in ACP session command list",
+            "failure": "pytest tests/acp/test_server.py -q (exit 1)",
+        },
+    ]
+    assert rendered_json["unknown_failure_families"] == {"update": 1, "unknown": 1}
+    assert rendered_json["baseline_allowlist_summary"] == {
+        "total_failures": 4,
+        "known_baseline_matches": 2,
+        "unknown_failures": 2,
+    }
+    assert rendered_yaml["known_baseline_matches"] == rendered_json["known_baseline_matches"]
+    assert rendered_yaml["unknown_failure_families"] == rendered_json["unknown_failure_families"]
+    assert rendered_yaml["baseline_allowlist_summary"] == rendered_json["baseline_allowlist_summary"]
+    assert "known baseline matches: 2" in rendered_text
+    assert "unknown failure families: unknown=1, update=1" in rendered_text
+    assert "baseline allowlist: matched=2 unmatched=2" in rendered_text
 
 
 @pytest.mark.parametrize(
