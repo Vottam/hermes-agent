@@ -832,6 +832,30 @@ def _report_publication_state(report: dict[str, Any]) -> dict[str, Any]:
     return derived
 
 
+def _update_failure_classification(report: dict[str, Any]) -> str:
+    """Derive the stable baseline-vs-regression class from existing report signals."""
+    integration_status = str(report.get("integration_status") or "")
+    run_status = str(report.get("run_status") or "")
+    final_status = str(report.get("final_status") or "")
+    medium_tested_status = str(report.get("medium_tested_status") or "")
+
+    if integration_status in {"blocked-high-risk", "blocked-batch-risk"} or run_status == "blocked" or final_status == "blocked":
+        return "out_of_scope"
+    if medium_tested_status == "baseline-failure":
+        return "baseline_known"
+    if medium_tested_status == "failed":
+        return "likely_regression"
+    if report.get("medium_reclassification_candidate") and medium_tested_status in {"passed", "not-run"}:
+        return "inconclusive"
+    return "inconclusive"
+
+
+def _with_update_failure_classification(report: dict[str, Any]) -> dict[str, Any]:
+    derived = dict(report)
+    derived.setdefault("update_failure_classification", _update_failure_classification(report))
+    return derived
+
+
 def _create_pr(root: Path, *, branch_name: str, title: str, body: str) -> tuple[str, int | None]:
     result = subprocess.run(
         [
@@ -1863,6 +1887,7 @@ def _format_list(title: str, items: Sequence[str], *, indent: str = "  ") -> lis
 
 
 def _build_text_report(report: dict[str, Any]) -> str:
+    report = _with_update_failure_classification(report)
     env = report["environment"]
     replay = report["replay"]
     conflict = report.get("conflict")
@@ -1915,6 +1940,7 @@ def _build_text_report(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Structured report")
     lines.append(f"  result: {replay['result']}")
+    lines.append(f"  update failure classification: {report.get('update_failure_classification', 'inconclusive')}")
     lines.append(f"  origin untouched: {str(report['verification']['origin_untouched']).lower()}")
     lines.append(f"  main untouched: {str(report['verification']['main_untouched']).lower()}")
     if "run_status" in report:
@@ -1941,6 +1967,7 @@ def _build_text_report(report: dict[str, Any]) -> str:
         lines.append(f"  skipped safe commits: {len(report.get('skipped_safe_commits') or [])}")
         lines.append(f"  replay continued after safe skip: {str(bool(report.get('replay_continued_after_skip'))).lower()}")
         lines.append(f"  integration status: {report.get('integration_status', 'not-needed')}")
+        lines.append(f"  update failure classification: {report.get('update_failure_classification', 'inconclusive')}")
         lines.append(f"  material changes detected: {str(bool(report.get('material_changes_detected'))).lower()}")
         lines.append(f"  tests run: {', '.join(report['tests_run']) if report['tests_run'] else '<none>'}")
         final_validation = report.get('final_validation') or {'status': 'not-needed', 'checks': []}
@@ -1991,13 +2018,13 @@ def _build_text_report(report: dict[str, Any]) -> str:
 
 
 def _stable_json(report: dict[str, Any]) -> str:
-    return json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return json.dumps(_with_update_failure_classification(report), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
 def _stable_yaml(report: dict[str, Any]) -> str:
     if yaml is None:  # pragma: no cover - dependency is expected to be available.
         raise SystemExit(f"✗ PyYAML is required for YAML output: {_YAML_IMPORT_ERROR}")
-    return yaml.safe_dump(report, sort_keys=True, allow_unicode=True)
+    return yaml.safe_dump(_with_update_failure_classification(report), sort_keys=True, allow_unicode=True)
 
 
 def _build_report(*, root: Path, replay_base: str = DEFAULT_REPLAY_BASE) -> dict[str, Any]:
