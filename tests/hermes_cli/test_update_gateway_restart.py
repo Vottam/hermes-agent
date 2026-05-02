@@ -872,15 +872,23 @@ class TestServicePidExclusion:
             launchctl_loaded=True,
         )
 
+        alive_pids = {SERVICE_PID, MANUAL_PID}
+
         def fake_find(exclude_pids=None, all_profiles=False):
             _exclude = exclude_pids or set()
-            return [p for p in [SERVICE_PID, MANUAL_PID] if p not in _exclude]
+            return [p for p in alive_pids if p not in _exclude]
+
+        def fake_kill(pid, sig):
+            import signal as _s
+            if pid == MANUAL_PID and sig in {_s.SIGTERM, _s.SIGKILL}:
+                alive_pids.discard(pid)
+            return None
 
         with patch.object(
             gateway_cli, "_get_service_pids", return_value={SERVICE_PID}
         ), patch.object(
             gateway_cli, "find_gateway_pids", side_effect=fake_find,
-        ), patch("os.kill") as mock_kill:
+        ), patch("os.kill", side_effect=fake_kill) as mock_kill:
             cmd_update(mock_args)
 
         captured = capsys.readouterr().out
