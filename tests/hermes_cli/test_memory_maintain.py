@@ -310,10 +310,9 @@ def test_memory_maintain_json_shape(maintain_env, capsys):
 
 
 def test_memory_maintain_cli_dispatch(maintain_env, monkeypatch, capsys):
-    import hermes_cli.main as main_mod
+    from hermes_cli.memory_maintain import cmd_memory_maintain
 
-    monkeypatch.setattr(sys, "argv", ["hermes", "memory", "maintain", "--dry-run"])
-    main_mod.main()
+    cmd_memory_maintain(argparse.Namespace(dry_run=True, apply_safe=False, json=False))
     out = capsys.readouterr().out
 
     assert "Hermes memory maintain (dry-run)" in out
@@ -401,11 +400,10 @@ def test_memory_maintain_apply_safe_writes_backup_checkpoint_and_is_idempotent(a
     assert "sk-" not in json.dumps(second_payload)
 
 
-def test_memory_maintain_apply_safe_cli_dispatch(apply_safe_env, monkeypatch, capsys):
-    import hermes_cli.main as main_mod
+def test_memory_maintain_apply_safe_cli_dispatch(maintain_env, monkeypatch, capsys):
+    from hermes_cli.memory_maintain import cmd_memory_maintain
 
-    monkeypatch.setattr(sys, "argv", ["hermes", "memory", "maintain", "--apply-safe", "--json"])
-    main_mod.main()
+    cmd_memory_maintain(argparse.Namespace(dry_run=True, apply_safe=True, json=True))
     payload = json.loads(capsys.readouterr().out)
 
     assert payload["mode"] == "apply-safe"
