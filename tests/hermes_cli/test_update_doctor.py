@@ -10,10 +10,8 @@ import yaml
 from hermes_cli.update_doctor import (
     ConflictBucket,
     LOCKFILE_METADATA_VALIDATION_COMMANDS,
-    classify_conflict,
-    main as doctor_main,
-    render_report,
     _batch_upstream_run,
+    _classify_failure_family,
     _classify_pr_risk,
     _classify_upstream_batch_risk,
     _fallback_batch_to_individual_commits,
@@ -23,6 +21,10 @@ from hermes_cli.update_doctor import (
     _prepare_medium_web_sandbox,
     _publish_run_artifacts,
     _run_medium_commit_sandbox_tests,
+    _update_failure_families,
+    classify_conflict,
+    main as doctor_main,
+    render_report,
 )
 
 
@@ -133,6 +135,7 @@ def _with_update_failure_classification(report: dict) -> dict:
         derived["update_failure_classification"] = "likely_regression"
     else:
         derived["update_failure_classification"] = "inconclusive"
+    derived.setdefault("update_failure_families", _update_failure_families(report))
     return derived
 
 
@@ -579,6 +582,67 @@ def test_render_report_text_includes_update_failure_classification() -> None:
     assert "update failure classification: likely_regression" in rendered
 
 
+@pytest.mark.parametrize(
+    ("failure", "family"),
+    [
+        ("pytest tests/hermes_cli/test_update_commit_replay.py -q (exit 1)", "update"),
+        ("pytest tests/hermes_cli/test_update_yes_flag.py::test_help -q (exit 1)", "update"),
+        ("pytest tests/hermes_cli/test_setup_wizard.py -q (exit 1)", "setup"),
+        ("pytest tests/plugins/memory/test_cache.py -q (exit 1)", "memory"),
+        ("pytest tests/agent/test_redact.py -q (exit 1)", "redaction"),
+        ("pytest tests/gateway/test_gateway_service.py -q (exit 1)", "gateway"),
+        ("pytest tests/acp/test_client.py -q (exit 1)", "cli_acp"),
+        ("pytest tests/hermes_cli/test_env_fallback.py -q (exit 1)", "docker_env"),
+        ("pytest tests/hermes_cli/test_web_server.py -q (exit 1)", "web_tui_plugin"),
+        ("pytest tests/run_agent/test_runner.py -q (exit 1)", "run_agent"),
+        ("pytest tests/other/test_misc.py -q (exit 1)", "unknown"),
+        ("cd web && npm run build", "unknown"),
+    ],
+)
+def test_classify_failure_family_groups_known_paths_and_names(failure: str, family: str) -> None:
+    assert _classify_failure_family(failure) == family
+
+
+def test_update_failure_families_are_serialized_and_rendered() -> None:
+    report = _sample_report(replay_result="passed", conflict=None)
+    report["medium_tested_status"] = "failed"
+    report["medium_test_failures"] = [
+        "pytest tests/hermes_cli/test_update_commit_replay.py -q (exit 1)",
+        "pytest tests/hermes_cli/test_update_yes_flag.py -q (exit 1)",
+        "pytest tests/hermes_cli/test_setup_wizard.py -q (exit 1)",
+        "pytest tests/plugins/memory/test_cache.py -q (exit 1)",
+        "pytest tests/agent/test_redact.py -q (exit 1)",
+        "pytest tests/gateway/test_gateway_service.py -q (exit 1)",
+        "pytest tests/acp/test_client.py -q (exit 1)",
+        "pytest tests/hermes_cli/test_env_fallback.py -q (exit 1)",
+        "pytest tests/hermes_cli/test_web_server.py -q (exit 1)",
+        "pytest tests/run_agent/test_runner.py -q (exit 1)",
+        "pytest tests/other/test_misc.py -q (exit 1)",
+        "cd web && npm run build",
+    ]
+
+    expected_families = {
+        "cli_acp": 1,
+        "docker_env": 1,
+        "gateway": 1,
+        "memory": 1,
+        "redaction": 1,
+        "run_agent": 1,
+        "setup": 1,
+        "unknown": 2,
+        "update": 2,
+        "web_tui_plugin": 1,
+    }
+
+    rendered_json = json.loads(render_report(report, "json"))
+    rendered_yaml = yaml.safe_load(render_report(report, "yaml"))
+    rendered_text = render_report(report, "text")
+
+    assert rendered_json["update_failure_classification"] == "likely_regression"
+    assert rendered_yaml["update_failure_classification"] == "likely_regression"
+    assert rendered_json["update_failure_families"] == expected_families
+    assert rendered_yaml["update_failure_families"] == expected_families
+    assert "update failure families: cli_acp=1, docker_env=1, gateway=1, memory=1, redaction=1, run_agent=1, setup=1, unknown=2, update=2, web_tui_plugin=1" in rendered_text
 def test_classify_pr_risk_handles_low_and_high_paths() -> None:
     docs_report = _sample_report()
     docs_report["repair"] = {

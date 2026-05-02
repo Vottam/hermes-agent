@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -20,6 +21,8 @@ except ImportError as exc:  # pragma: no cover - dependency is part of Hermes, b
     _YAML_IMPORT_ERROR = exc
 else:
     _YAML_IMPORT_ERROR = None
+
+from collections import Counter
 
 TOOL_NAME = "hermes-update-doctor"
 SCHEMA_VERSION = 1
@@ -850,9 +853,44 @@ def _update_failure_classification(report: dict[str, Any]) -> str:
     return "inconclusive"
 
 
+_FAILURE_PATH_RE = re.compile(r"(tests/[^\s()]+)")
+
+
+def _classify_failure_family(path_or_failure: str) -> str:
+    haystack = path_or_failure.lower()
+    match = _FAILURE_PATH_RE.search(haystack)
+    if match:
+        haystack = match.group(1).split("::", 1)[0]
+
+    family_rules: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("update", ("tests/hermes_cli/test_update_", "tests/hermes_cli/test_cmd_update.py")),
+        ("setup", ("tests/hermes_cli/test_setup",)),
+        ("memory", ("tests/hermes_cli/test_memory_", "tests/plugins/memory/")),
+        ("redaction", ("tests/agent/test_redact.py", "redaction")),
+        ("gateway", ("tests/gateway/", "gateway_service")),
+        ("cli_acp", ("tests/cli/", "tests/acp/")),
+        ("docker_env", ("dockerfile", "credential_pool", "vercel", "env_fallback")),
+        ("web_tui_plugin", ("tui_gateway", "web_server", "kanban_dashboard")),
+        ("run_agent", ("tests/run_agent/",)),
+    )
+
+    for family, markers in family_rules:
+        if any(marker in haystack for marker in markers):
+            return family
+    return "unknown"
+
+
+
+def _update_failure_families(report: dict[str, Any]) -> dict[str, int]:
+    failures = report.get("medium_test_failures") or report.get("test_failures") or []
+    counts = Counter(_classify_failure_family(failure) for failure in failures)
+    return {family: counts[family] for family in sorted(counts) if counts[family]}
+
+
 def _with_update_failure_classification(report: dict[str, Any]) -> dict[str, Any]:
     derived = dict(report)
     derived.setdefault("update_failure_classification", _update_failure_classification(report))
+    derived.setdefault("update_failure_families", _update_failure_families(report))
     return derived
 
 
@@ -1886,6 +1924,12 @@ def _format_list(title: str, items: Sequence[str], *, indent: str = "  ") -> lis
     return lines
 
 
+def _format_family_counts(families: dict[str, int]) -> str:
+    if not families:
+        return "<none>"
+    return ", ".join(f"{family}={count}" for family, count in families.items())
+
+
 def _build_text_report(report: dict[str, Any]) -> str:
     report = _with_update_failure_classification(report)
     env = report["environment"]
@@ -1941,6 +1985,7 @@ def _build_text_report(report: dict[str, Any]) -> str:
     lines.append("Structured report")
     lines.append(f"  result: {replay['result']}")
     lines.append(f"  update failure classification: {report.get('update_failure_classification', 'inconclusive')}")
+    lines.append(f"  update failure families: {_format_family_counts(report.get('update_failure_families') or {})}")
     lines.append(f"  origin untouched: {str(report['verification']['origin_untouched']).lower()}")
     lines.append(f"  main untouched: {str(report['verification']['main_untouched']).lower()}")
     if "run_status" in report:
