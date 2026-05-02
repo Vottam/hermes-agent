@@ -101,6 +101,8 @@ AUTHOR_MAP = {
     "260878550+beenherebefore@users.noreply.github.com": "beenherebefore",
     "79389617+txbxxx@users.noreply.github.com": "txbxxx",
     "liuhao03@bilibili.com": "liuhao1024",
+    "liuhao1024@users.noreply.github.com": "liuhao1024",
+    "jslizar@users.noreply.github.com": "jslizar",
     "130918800+devorun@users.noreply.github.com": "devorun",
     "surat.s@itm.kmutnb.ac.th": "beesrsj2500",
     "beesr@bee.localdomain": "beesrsj2500",
@@ -371,6 +373,10 @@ AUTHOR_MAP = {
     "xowiekk@gmail.com": "Xowiek",
     "1243352777@qq.com": "zons-zhaozhy",
     "e.silacandmr@gmail.com": "Es1la",
+    "h3057183414@gmail.com": "CoreyNoDream",
+    "franksong2702@gmail.com": "franksong2702",
+    "673088860@qq.com": "ambition0802",
+    "beibei1988@proton.me": "beibi9966",
     # ── bulk addition: 75 emails resolved via API, PR salvage bodies, noreply
     #    crossref, and GH contributor list matching (April 2026 audit) ──
     "1115117931@qq.com": "aaronagent",
