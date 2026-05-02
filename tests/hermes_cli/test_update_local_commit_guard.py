@@ -236,6 +236,9 @@ def test_update_preflight_runs_before_destructive_update_operation(
         if cmd == ["git", "pull", "--ff-only", "origin", "main"]:
             order.append("pull")
             return _cp(cmd)
+        if cmd == ["ps", "-A", "-o", "pid=,command="]:
+            order.append("dashboard-scan")
+            return _cp(cmd, stdout="")
         raise AssertionError(f"unexpected command: {cmd_str}")
 
     mock_run.side_effect = fake_run

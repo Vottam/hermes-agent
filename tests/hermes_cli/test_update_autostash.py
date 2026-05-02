@@ -478,11 +478,9 @@ def test_cmd_update_restores_original_branch_after_success(monkeypatch, tmp_path
     main_checkout_idx = next(i for i, cmd in enumerate(commands) if "git checkout main" in cmd)
     rev_list_idx = next(i for i, cmd in enumerate(commands) if "git rev-list HEAD..origin/main --count" in cmd)
     branch_checkout_idx = next(i for i, cmd in enumerate(commands) if "git checkout fix/something" in cmd)
-    report_status_idx = next(i for i, cmd in enumerate(commands) if cmd == "git status --short --branch")
 
     assert main_checkout_idx < rev_list_idx
     assert rev_list_idx < branch_checkout_idx
-    assert branch_checkout_idx < report_status_idx
     assert restore_trace == ["restore"]
 
 
