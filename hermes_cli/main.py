@@ -7577,6 +7577,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             restarted_services = []
             killed_pids = set()
             relaunched_profiles = []
+            profile_relaunched_pids = set()
 
             # --- Systemd services (Linux) ---
             # Discover all hermes-gateway* units (default + profiles)
@@ -7788,6 +7789,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     except (ProcessLookupError, PermissionError):
                         pass
                 killed_pids.add(pid)
+                profile_relaunched_pids.add(pid)
                 relaunched_profiles.append(proc.profile)
 
             for pid in manual_pids:
@@ -7838,7 +7840,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 # update (killed_pids).  Anything new is a gateway that
                 # started AFTER our restart attempt — respecting user
                 # intent, we don't kill those.
-                _stuck = [pid for pid in _surviving if pid in killed_pids]
+                _stuck = [
+                    pid for pid in _surviving
+                    if pid in killed_pids and pid not in profile_relaunched_pids
+                ]
                 if _stuck:
                     print()
                     print(
