@@ -309,11 +309,11 @@ def build_tool_start(
         )
 
     if tool_name == "read_file":
-        path = arguments.get("path", "")
-        content = [acp.tool_content(acp.text_block(f"Reading {path}"))]
+        # The title and location already identify the file. Sending a synthetic
+        # "Reading ..." content block makes Zed render an unhelpful Output
+        # section before the real file contents arrive on completion.
         return acp.start_tool_call(
-            tool_call_id, title, kind=kind, content=content, locations=locations,
-            raw_input=arguments,
+            tool_call_id, title, kind=kind, content=None, locations=locations,
         )
 
     if tool_name == "search_files":
