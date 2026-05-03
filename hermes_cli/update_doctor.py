@@ -100,6 +100,32 @@ COVERED_UPSTREAM_COMMITS: dict[str, dict[str, Any]] = {
             "remaining web_server failure is known telegram baseline",
         ],
     },
+    "ef9a08a872d1ed87eb4c91cf8ad8e8f4ef5a6e2b": {
+        "upstream_commit": "ef9a08a872d1ed87eb4c91cf8ad8e8f4ef5a6e2b",
+        "covered_by_commits": [
+            "6a210601cc1ceac3d8bda4e6fde59e5630214edf",
+        ],
+        "covered_by_pr": 46,
+        "reason": "equivalent fork fix via PR #46",
+        "evidence": [
+            "acp adapter tests passed",
+            "update_doctor tests passed",
+            "web build passed",
+        ],
+    },
+    "b294d1d0229ff6026838a04c4cb59c3b13e4827f": {
+        "upstream_commit": "b294d1d0229ff6026838a04c4cb59c3b13e4827f",
+        "covered_by_commits": [
+            "da44125c3aea0512cd853b6514ca6a9f719c0669",
+        ],
+        "covered_by_pr": 42,
+        "reason": "equivalent fork fix via PR #42",
+        "evidence": [
+            "acp adapter tests passed",
+            "update_doctor tests passed",
+            "web build passed",
+        ],
+    },
 }
 
 
