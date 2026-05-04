@@ -125,6 +125,19 @@ COVERED_UPSTREAM_COMMITS: dict[str, dict[str, Any]] = {
             "update/security cluster passed",
         ],
     },
+    "eb612f55748d8f0888f09f055abd86afef925150": {
+        "upstream_commit": "eb612f55748d8f0888f09f055abd86afef925150",
+        "covered_by_commits": [
+            "2bbc6defb69745e78249449100687fe05416d060",
+        ],
+        "covered_by_pr": 50,
+        "reason": "equivalent fork fix via PR #50",
+        "evidence": [
+            "acp tools tests passed",
+            "update_doctor tests passed",
+            "replay/final report tests passed",
+        ],
+    },
     "b294d1d0229ff6026838a04c4cb59c3b13e4827f": {
         "upstream_commit": "b294d1d0229ff6026838a04c4cb59c3b13e4827f",
         "covered_by_commits": [
