@@ -113,6 +113,18 @@ COVERED_UPSTREAM_COMMITS: dict[str, dict[str, Any]] = {
             "web build passed",
         ],
     },
+    "72c8037a24b58b7b1a38a99903cc0bf8a3d7595c": {
+        "upstream_commit": "72c8037a24b58b7b1a38a99903cc0bf8a3d7595c",
+        "covered_by_commits": [
+            "bd10b5b6434a5c9a3d13b1406d73ff2da37d2e7a",
+        ],
+        "covered_by_pr": 48,
+        "reason": "equivalent fork fix via PR #48",
+        "evidence": [
+            "acp tools tests passed",
+            "update/security cluster passed",
+        ],
+    },
     "b294d1d0229ff6026838a04c4cb59c3b13e4827f": {
         "upstream_commit": "b294d1d0229ff6026838a04c4cb59c3b13e4827f",
         "covered_by_commits": [
