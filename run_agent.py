@@ -11705,6 +11705,62 @@ class AIAgent:
                             else:
                                 error_details.append("response.choices is empty")
 
+                    # Capture the actual model returned by the provider
+                    # (e.g. OpenRouter resolves @preset/hermes → minimax/minimax-m2.5)
+                    if (
+                        not response_invalid
+                        and response
+                        and hasattr(response, "model")
+                        and response.model
+                    ):
+                        _resp_model = response.model.strip()
+                        if _resp_model and _resp_model != self.model:
+                            self._resolved_model = _resp_model
+
+                            # Update context window from the real resolved model
+                            # so the compressor uses the correct context length
+                            # (e.g. 128K instead of 256K for @preset/hermes).
+                            try:
+                                _prev_resolved = getattr(self, "_resolved_context_model", None)
+                                if _resp_model == _prev_resolved:
+                                    pass  # already resolved for this model
+                                else:
+                                    from agent.model_metadata import get_model_context_length
+                                    _real_ctx = None
+                                    _real_ctx = get_model_context_length(
+                                        _resp_model,
+                                        base_url=self.base_url,
+                                        api_key=getattr(self, "api_key", ""),
+                                        config_context_length=getattr(
+                                            self, "_config_context_length", None
+                                        ),
+                                        provider=self.provider,
+                                    )
+                                    if isinstance(_real_ctx, int) and _real_ctx > 0:
+                                        self._resolved_context_length = _real_ctx
+                                        self._resolved_context_model = _resp_model
+                                        _compressor = getattr(
+                                            self, "context_compressor", None
+                                        )
+                                        if _compressor and hasattr(
+                                            _compressor, "update_model"
+                                        ):
+                                            _compressor.update_model(
+                                                model=_resp_model,
+                                                context_length=_real_ctx,
+                                                base_url=self.base_url,
+                                                api_key=getattr(self, "api_key", ""),
+                                                provider=self.provider,
+                                            )
+                                        if not self.quiet_mode:
+                                            logger.info(
+                                                "Resolved context length for %s: %s",
+                                                _resp_model,
+                                                _real_ctx,
+                                            )
+                            except Exception:
+                                pass  # keep current context on failure
+
                     if response_invalid:
                         # Stop spinner before printing error messages
                         if thinking_spinner:

@@ -729,3 +729,71 @@ class TestCmdUpdateGatewayMode:
         from types import SimpleNamespace
         args = SimpleNamespace(gateway=True)
         assert args.gateway is True
+
+
+class TestHupOverlayBranchGuard:
+    """/hup must block unsafe ff-only pulls on mastertrend/overlays."""
+
+    @pytest.mark.asyncio
+    async def test_overlay_branch_blocks_before_pull(self, monkeypatch):
+        from gateway import run as gateway_run
+
+        runner = _make_runner()
+        event = _make_event(text="/hup")
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(tuple(cmd))
+            if cmd[:3] == ["git", "branch", "--show-current"]:
+                return type("R", (), {"returncode": 0, "stdout": "mastertrend/overlays\n", "stderr": ""})()
+            raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+        monkeypatch.setattr(gateway_run.subprocess, "run", fake_run)
+        monkeypatch.setattr(gateway_run, "is_managed", lambda: False)
+
+        result = await runner._handle_hup_command(event)
+
+        assert "overlay-aware updates" in result
+        assert "ff-only pull" in result
+        assert all("pull" not in call for call in calls)
+
+    @pytest.mark.asyncio
+    async def test_main_branch_still_reaches_pull(self, monkeypatch):
+        from gateway import run as gateway_run
+
+        runner = _make_runner()
+        event = _make_event(text="/hup")
+        calls = []
+
+        class PullReached(RuntimeError):
+            pass
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(tuple(cmd))
+            if cmd[:3] == ["git", "branch", "--show-current"]:
+                return type("R", (), {"returncode": 0, "stdout": "main\n", "stderr": ""})()
+            if cmd[:2] == ["git", "status"]:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if cmd[:2] == ["git", "diff"]:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                return type("R", (), {"returncode": 0, "stdout": "abc123\n", "stderr": ""})()
+            if cmd[:3] == ["git", "fetch", "origin"]:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if cmd[:3] == ["git", "rev-list", "HEAD...origin/main"]:
+                return type("R", (), {"returncode": 0, "stdout": "1\n", "stderr": ""})()
+            if cmd[:2] == ["git", "restore"]:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if cmd[:3] == ["git", "status", "--porcelain"]:
+                return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+            if cmd[:2] == ["git", "pull"]:
+                raise PullReached("pull reached")
+            raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+        monkeypatch.setattr(gateway_run.subprocess, "run", fake_run)
+        monkeypatch.setattr(gateway_run, "is_managed", lambda: False)
+
+        with pytest.raises(PullReached):
+            await runner._handle_hup_command(event)
+
+        assert any(call[:2] == ("git", "pull") for call in calls)

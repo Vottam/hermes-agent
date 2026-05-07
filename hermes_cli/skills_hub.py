@@ -31,7 +31,7 @@ _console = Console()
 # Shared do_* functions
 # ---------------------------------------------------------------------------
 
-def _resolve_short_name(name: str, sources, console: Console) -> str:
+def _resolve_short_name(name: str, sources, console: Console, quiet: bool = False) -> str:
     """
     Resolve a short skill name (e.g. 'pptx') to a full identifier by searching
     all sources. If exactly one match is found, returns its identifier. If multiple
@@ -41,7 +41,8 @@ def _resolve_short_name(name: str, sources, console: Console) -> str:
     from tools.skills_hub import unified_search
 
     c = console or _console
-    c.print(f"[dim]Resolving '{name}'...[/]")
+    if not quiet:
+        c.print(f"[dim]Resolving '{name}'...[/]")
 
     results = unified_search(name, sources, source_filter="all", limit=20)
 
@@ -49,8 +50,12 @@ def _resolve_short_name(name: str, sources, console: Console) -> str:
     exact = [r for r in results if r.name.lower() == name.lower()]
 
     if len(exact) == 1:
-        c.print(f"[dim]Resolved to: {exact[0].identifier}[/]")
+        if not quiet:
+            c.print(f"[dim]Resolved to: {exact[0].identifier}[/]")
         return exact[0].identifier
+
+    if quiet:
+        return ""
 
     if len(exact) > 1:
         c.print(f"\n[yellow]Multiple skills named '{name}' found:[/]")
@@ -134,6 +139,40 @@ def _resolve_source_meta_and_bundle(identifier: str, sources):
             break
 
     return meta, bundle, matched_source
+
+
+def _resolve_local_skill_meta_and_bundle(identifier: str):
+    """Fallback resolver for local skills in ~/.hermes/skills/."""
+    from types import SimpleNamespace
+    from tools.skills_tool import skill_view
+
+    try:
+        payload = json.loads(skill_view(identifier, preprocess=False))
+    except Exception:
+        return None, None
+
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return None, None
+
+    content = payload.get("content", "")
+    if isinstance(content, bytes):
+        content = content.decode("utf-8", errors="replace")
+
+    meta = SimpleNamespace(
+        name=payload.get("name", identifier),
+        description=payload.get("description", ""),
+        source="local",
+        identifier=identifier,
+        trust_level="local",
+        tags=list(payload.get("tags") or []),
+        extra={},
+    )
+    bundle = SimpleNamespace(
+        name=meta.name,
+        files={"SKILL.md": content},
+        source="local",
+    )
+    return meta, bundle
 
 
 def _derive_category_from_install_path(install_path: str) -> str:
@@ -632,15 +671,20 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
     auth = GitHubAuth()
     sources = create_source_router(auth)
 
+    resolved_identifier = identifier
     if "/" not in identifier:
-        identifier = _resolve_short_name(identifier, sources, c)
-        if not identifier:
-            return
+        resolved_identifier = _resolve_short_name(identifier, sources, c, quiet=True)
 
-    meta, bundle, _matched_source = _resolve_source_meta_and_bundle(identifier, sources)
+    meta, bundle, _matched_source = (
+        _resolve_source_meta_and_bundle(resolved_identifier, sources)
+        if resolved_identifier
+        else (None, None, None)
+    )
+    if not meta:
+        meta, bundle = _resolve_local_skill_meta_and_bundle(identifier)
 
     if not meta:
-        c.print(f"[bold red]Error:[/] Could not find '{identifier}' in any source.\n")
+        c.print(f"[bold red]Error:[/] Could not find '{identifier}' in any hub source or local skills directory.\n")
         return
 
     c.print()
@@ -733,10 +777,14 @@ def inspect_skill(identifier: str) -> Optional[dict]:
     sources = create_source_router(auth)
     ident = identifier
     if "/" not in ident:
-        ident = _resolve_short_name(ident, sources, c)
-        if not ident:
-            return None
-    meta, bundle, _ = _resolve_source_meta_and_bundle(ident, sources)
+        ident = _resolve_short_name(ident, sources, c, quiet=True)
+    meta, bundle, _ = (
+        _resolve_source_meta_and_bundle(ident, sources)
+        if ident
+        else (None, None, None)
+    )
+    if not meta:
+        meta, bundle = _resolve_local_skill_meta_and_bundle(identifier)
     if not meta:
         return None
     out: dict = {

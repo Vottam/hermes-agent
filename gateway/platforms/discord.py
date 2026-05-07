@@ -2869,6 +2869,50 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
 
+    async def _run_hup_slash(
+        self,
+        interaction: discord.Interaction,
+        command_text: str,
+        followup_msg: str | None = None,
+    ) -> None:
+        """Run /hup and its alias through the internal gateway handler.
+
+        This bypasses the generic string-dispatch path so Discord never routes
+        /hup through an external script or shell alias.  The gateway runner's
+        _handle_hup_command() remains the single canonical implementation.
+        """
+        try:
+            _user = interaction.user
+            _chan_id = getattr(interaction.channel, "id", None) or getattr(interaction, "channel_id", None)
+            logger.info(
+                "[Discord] slash '%s' invoked by user=%s id=%s channel=%s guild=%s",
+                command_text,
+                getattr(_user, "name", "?"),
+                getattr(_user, "id", "?"),
+                _chan_id,
+                getattr(interaction, "guild_id", None),
+            )
+        except Exception:
+            pass
+
+        if not await self._check_slash_authorization(interaction, command_text):
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        event = self._build_slash_event(interaction, command_text)
+        runner = getattr(self, "gateway_runner", None)
+        if runner and hasattr(runner, "_handle_hup_command"):
+            await runner._handle_hup_command(event)
+        else:
+            await self.handle_message(event)
+        try:
+            if followup_msg:
+                await interaction.edit_original_response(content=followup_msg)
+            else:
+                await interaction.delete_original_response()
+        except Exception as e:
+            logger.debug("Discord interaction cleanup failed: %s", e)
+
     def _register_slash_commands(self) -> None:
         """Register Discord slash commands on the command tree."""
         if not self._client:
@@ -2980,6 +3024,14 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="update", description="Update Hermes Agent to the latest version")
         async def slash_update(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/update", "Update initiated~")
+
+        @tree.command(name="hup", description="Safe Hermes update using the internal handler")
+        async def slash_hup(interaction: discord.Interaction):
+            await self._run_hup_slash(interaction, "/hup", "Update initiated~")
+
+        @tree.command(name="update-safe", description="Alias for /hup")
+        async def slash_update_safe(interaction: discord.Interaction):
+            await self._run_hup_slash(interaction, "/update-safe", "Update initiated~")
 
         @tree.command(name="restart", description="Gracefully restart the Hermes gateway")
         async def slash_restart(interaction: discord.Interaction):

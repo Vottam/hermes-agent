@@ -2635,7 +2635,12 @@ class HermesCLI:
         # changes mid-session, so the TUI would show a stale name after
         # _try_activate_fallback() switches provider/model.
         agent = getattr(self, "agent", None)
-        model_name = (getattr(agent, "model", None) or self.model or "unknown")
+        model_name = (
+            getattr(agent, "_resolved_model", None)
+            or getattr(agent, "model", None)
+            or self.model
+            or "unknown"
+        )
         model_short = model_name.split("/")[-1] if "/" in model_name else model_name
         if model_short.endswith(".gguf"):
             model_short = model_short[:-5]
@@ -2681,7 +2686,13 @@ class HermesCLI:
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
-            context_length = getattr(compressor, "context_length", 0) or 0
+            # Prefer agent-level resolved context length (from _resolved_model)
+            # over compressor.context_length — the compressor may not have been
+            # updated yet if the resolved model just changed this turn.
+            context_length = getattr(
+                agent, "_resolved_context_length",
+                getattr(compressor, "context_length", 0) or 0,
+            )
             snapshot["context_tokens"] = context_tokens
             snapshot["context_length"] = context_length or None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
@@ -6918,6 +6929,8 @@ class HermesCLI:
             self._handle_voice_command(cmd_original)
         elif canonical == "busy":
             self._handle_busy_command(cmd_original)
+        elif canonical == "hup":
+            self._handle_hup_command(cmd_original)
         else:
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
@@ -7028,6 +7041,325 @@ class HermesCLI:
         
         return True
     
+    def _handle_hup_command(self, cmd: str):
+        """Handle /hup — safe Hermes update with snapshot, overlay, and doctor.
+
+        Flow (CLI version):
+        1. Create snapshot in /root/hermes-update-snapshot-YYYYMMDD-HHMMSS
+        2. Save git status, git diff, HEAD
+        3. git fetch origin main
+        4. Check divergence HEAD...origin/main
+        5. If no updates → clear .update_check, report "already up to date"
+        6. If updates → git pull --ff-only, reapply overlay, validate,
+           pip install -e, clear .update_check, doctor
+        7. Generate short report (no restart — CLI has no gateway to restart)
+        """
+        import json
+        import shutil
+        import subprocess
+        from datetime import datetime
+        from pathlib import Path
+
+        project_root = Path("/opt/hermes-agent").resolve()
+        git_dir = project_root / ".git"
+        if not git_dir.exists():
+            self._console_print(
+                "✗ Not a git repository — cannot update.\n"
+                f"project_root={project_root}\n"
+                f"cwd={Path.cwd()}\n"
+                f"git_dir_exists={git_dir.exists()}"
+            )
+            return
+
+        try:
+            branch_result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=project_root, capture_output=True, text=True, timeout=5,
+            )
+            current_branch = branch_result.stdout.strip()
+        except Exception:
+            current_branch = ""
+
+        if current_branch == "mastertrend/overlays":
+            self._console_print(
+                "mastertrend/overlays uses overlay-aware updates; direct ff-only pull from origin/main is blocked. "
+                "Run the overlay refresh workflow or /hup overlay when implemented."
+            )
+            return
+
+        hermes_home = Path.home() / ".hermes"
+
+        # Step 1: Create snapshot
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        snap_dir = Path(f"/root/hermes-update-snapshot-{ts}")
+        snap_dir.mkdir(parents=True, exist_ok=True)
+
+        report_lines = []
+        report_lines.append(f"Snapshot: {snap_dir}")
+
+        # Save git status
+        try:
+            gs = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=project_root, capture_output=True, text=True, timeout=10,
+            )
+            (snap_dir / "git_status.txt").write_text(gs.stdout or "(clean)")
+        except Exception as e:
+            (snap_dir / "git_status.txt").write_text(f"(error: {e})")
+
+        # Save git diff
+        try:
+            gd = subprocess.run(
+                ["git", "diff"],
+                cwd=project_root, capture_output=True, text=True, timeout=10,
+            )
+            (snap_dir / "git_diff.txt").write_text(gd.stdout or "(no diff)")
+        except Exception as e:
+            (snap_dir / "git_diff.txt").write_text(f"(error: {e})")
+
+        # Save HEAD
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_root, capture_output=True, text=True, timeout=5,
+            )
+            head_hash = head.stdout.strip()
+            (snap_dir / "HEAD.txt").write_text(head_hash)
+        except Exception:
+            head_hash = "unknown"
+            (snap_dir / "HEAD.txt").write_text("unknown")
+
+        report_lines.append(f"HEAD before: {head_hash[:12]}")
+
+        # Step 2: Fetch origin/main
+        report_lines.append("Fetching origin/main...")
+        try:
+            fetch_result = subprocess.run(
+                ["git", "fetch", "origin", "main"],
+                cwd=project_root, capture_output=True, text=True, timeout=60,
+            )
+        except Exception as e:
+            self._console_print(f"✗ Fetch failed: {e}\nSnapshot: {snap_dir}")
+            return
+
+        if fetch_result.returncode != 0:
+            stderr = fetch_result.stderr.strip()
+            self._console_print(f"✗ Fetch failed: {stderr}\nSnapshot: {snap_dir}")
+            return
+
+        # Step 3: Check divergence
+        try:
+            rev_result = subprocess.run(
+                ["git", "rev-list", "HEAD...origin/main", "--count"],
+                cwd=project_root, capture_output=True, text=True, timeout=10,
+            )
+            behind = int(rev_result.stdout.strip())
+        except Exception as e:
+            self._console_print(f"✗ Divergence check failed: {e}\nSnapshot: {snap_dir}")
+            return
+
+        # Step 4: No updates → clear cache and report
+        if behind == 0:
+            # Clear update_check cache
+            for cache_file in [hermes_home / ".update_check"] + list(hermes_home.glob("profiles/*/.update_check")):
+                try:
+                    cache_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._console_print("\n".join([
+                "✓ Already up to date — no updates needed.",
+                f"Cache cleared: .update_check removed",
+                f"Snapshot: {snap_dir}",
+            ]))
+            return
+
+        report_lines.append(f"Updates available: {behind} commit(s) behind origin/main")
+
+        # Step 5: Restore overlay files before pull to avoid ff-only conflicts
+        overlay_files = [
+            "cli.py",
+            "gateway/run.py",
+            "hermes_cli/commands.py",
+            "hermes_cli/skills_hub.py",
+        ]
+        report_lines.append("Restoring overlay files before pull...")
+        try:
+            restore_result = subprocess.run(
+                ["git", "restore", "--"] + overlay_files,
+                cwd=project_root, capture_output=True, text=True, timeout=10,
+            )
+            if restore_result.returncode != 0:
+                stderr = restore_result.stderr.strip()
+                # If files weren't modified, git restore may warn — that's OK
+                if "did not match any file" not in stderr:
+                    report_lines.append(f"⚠ git restore warning: {stderr[:200]}")
+        except Exception as e:
+            report_lines.append(f"⚠ git restore error: {e}")
+
+        # Confirm no tracked modifications remain (overlay files should be clean now)
+        try:
+            status_result = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=project_root, capture_output=True, text=True, timeout=10,
+            )
+            modified = [
+                line for line in status_result.stdout.strip().splitlines()
+                if line.strip()
+            ]
+            if modified:
+                # If there are still tracked modifications, abort and reapply overlays
+                report_lines.append(f"⚠ Unexpected tracked modifications remain after restore:")
+                for line in modified:
+                    report_lines.append(f"  {line}")
+                report_lines.append("ABORT — restoring overlays.")
+                # Reapply overlays to restore functional state
+                reapply_script = Path("/root/mastertrend-overlays/apply-overlays.sh")
+                if reapply_script.exists():
+                    try:
+                        subprocess.run(
+                            [str(reapply_script), str(project_root), "--in-place"],
+                            capture_output=True, text=True, timeout=60,
+                        )
+                        report_lines.append("✓ Overlays re-applied for recovery.")
+                    except Exception:
+                        report_lines.append("⚠ Overlay reapplication failed — manual recovery needed.")
+                self._console_print("\n".join(report_lines))
+                return
+        except Exception:
+            pass  # non-fatal
+
+        # Step 6: Pull updates
+        report_lines.append("Pulling updates (ff-only)...")
+        try:
+            pull_result = subprocess.run(
+                ["git", "pull", "--ff-only", "origin", "main"],
+                cwd=project_root, capture_output=True, text=True, timeout=120,
+            )
+        except Exception as e:
+            self._console_print(f"✗ Pull failed: {e}\nSnapshot: {snap_dir}")
+            return
+
+        if pull_result.returncode != 0:
+            self._console_print("\n".join([
+                f"✗ Pull failed: {pull_result.stderr.strip()}",
+                f"Snapshot: {snap_dir}",
+            ]))
+            return
+
+        # Get new HEAD
+        try:
+            new_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_root, capture_output=True, text=True, timeout=5,
+            )
+            new_head_hash = new_head.stdout.strip()
+        except Exception:
+            new_head_hash = "unknown"
+
+        report_lines.append(f"HEAD after: {new_head_hash[:12]}")
+
+        # Step 7: Reapply overlay
+        overlay_script = Path("/root/mastertrend-overlays/apply-overlays.sh")
+        overlay_ok = True
+        if overlay_script.exists():
+            report_lines.append("Reapplying overlays (--in-place)...")
+            try:
+                ov_result = subprocess.run(
+                    [str(overlay_script), str(project_root), "--in-place"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if ov_result.returncode != 0:
+                    overlay_ok = False
+                    report_lines.append(f"✗ Overlay failed: {ov_result.stderr.strip()[:200]}")
+                    report_lines.append(f"⚠ PULL WAS APPLIED but overlay reapplication failed.")
+                    report_lines.append(f"   Snapshot: {snap_dir}")
+                    report_lines.append(f"   Recovery: /root/mastertrend-overlays/apply-overlays.sh {project_root} --in-place")
+                else:
+                    report_lines.append("✓ Overlay applied.")
+            except Exception as e:
+                overlay_ok = False
+                report_lines.append(f"✗ Overlay error: {e}")
+                report_lines.append(f"⚠ PULL WAS APPLIED but overlay reapplication failed.")
+                report_lines.append(f"   Snapshot: {snap_dir}")
+                report_lines.append(f"   Recovery: /root/mastertrend-overlays/apply-overlays.sh {project_root} --in-place")
+        else:
+            report_lines.append("⚠ Overlay script not found — skipping.")
+
+        # Step 8: Validate overlay
+        hup_sh = Path("/root/mastertrend-overlays/hup.sh")
+        if hup_sh.exists():
+            try:
+                st_result = subprocess.run(
+                    [str(hup_sh), "status", str(project_root)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if "todos os overlays ativos parecem aplicados" in st_result.stdout:
+                    report_lines.append("✓ Overlay validation: OK")
+                else:
+                    report_lines.append("⚠ Overlay validation: some overlays may not be applied.")
+            except Exception:
+                report_lines.append("⚠ Overlay validation: could not run.")
+
+        # Step 9: pip install -e
+        venv_python = project_root / "venv" / "bin" / "python"
+        if not venv_python.exists():
+            venv_python = project_root / ".venv" / "bin" / "python"
+        if venv_python.exists():
+            report_lines.append("Running pip install -e ...")
+            try:
+                pip_result = subprocess.run(
+                    [str(venv_python), "-m", "pip", "install", "-e", str(project_root)],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if pip_result.returncode != 0:
+                    report_lines.append(f"✗ pip install failed: {pip_result.stderr.strip()[:200]}")
+                else:
+                    report_lines.append("✓ pip install -e done.")
+            except Exception as e:
+                report_lines.append(f"✗ pip install error: {e}")
+        else:
+            report_lines.append("⚠ venv not found — skipping pip install.")
+
+        # Step 10: Clear update_check cache
+        for cache_file in [hermes_home / ".update_check"] + list(hermes_home.glob("profiles/*/.update_check")):
+            try:
+                cache_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+        report_lines.append("Cache cleared: .update_check removed")
+
+        # Step 11: Run hermes doctor
+        hermes_cmd = shutil.which("hermes")
+        if hermes_cmd:
+            report_lines.append("Running hermes doctor...")
+            try:
+                doc_result = subprocess.run(
+                    [hermes_cmd, "doctor"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                doc_output = (doc_result.stdout + doc_result.stderr).strip()
+                doc_lines = [l for l in doc_output.splitlines() if l.strip() and ("✓" in l or "✗" in l or "⚠" in l or "pass" in l.lower() or "fail" in l.lower())]
+                if doc_lines:
+                    report_lines.append("Doctor:")
+                    report_lines.extend(f"  {l}" for l in doc_lines[:10])
+                else:
+                    report_lines.append("✓ Doctor completed.")
+            except Exception as e:
+                report_lines.append(f"⚠ Doctor error: {e}")
+        else:
+            report_lines.append("⚠ hermes command not found — skipping doctor.")
+
+        # Step 12: Report
+        report_lines.append("")
+        report_lines.append("── Summary ──")
+        report_lines.append(f"HEAD before:  {head_hash[:12]}")
+        report_lines.append(f"HEAD after:   {new_head_hash[:12]}")
+        report_lines.append(f"Commits:      {behind} applied")
+        report_lines.append(f"Overlay:      {'OK' if overlay_ok else 'FAILED'}")
+        report_lines.append(f"Snapshot:     {snap_dir}")
+
+        self._console_print("\n".join(report_lines))
+
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.
 

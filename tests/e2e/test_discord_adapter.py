@@ -5,7 +5,8 @@ Covers the fix for slash commands not being recognized when sent via
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -104,3 +105,58 @@ class TestAutoThreadingPreservesCommand:
         response = get_response_text(discord_adapter)
         assert response is not None
         assert "/new" in response
+
+
+class TestHupSlashBypassesStringDispatch:
+    async def test_hup_slash_calls_gateway_handler_directly(self, discord_adapter):
+        """/hup should call GatewayRunner._handle_hup_command directly."""
+        sent_event = object()
+        gateway_runner = MagicMock()
+        gateway_runner._handle_hup_command = AsyncMock(return_value="ok")
+        discord_adapter.gateway_runner = gateway_runner
+        discord_adapter.handle_message = AsyncMock()
+        discord_adapter._check_slash_authorization = AsyncMock(return_value=True)
+        discord_adapter._build_slash_event = MagicMock(return_value=sent_event)
+
+        interaction = MagicMock()
+        interaction.user = SimpleNamespace(name="alice", id=1)
+        interaction.channel = SimpleNamespace(id=123)
+        interaction.channel_id = 123
+        interaction.guild_id = 456
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        interaction.delete_original_response = AsyncMock()
+
+        await discord_adapter._run_hup_slash(interaction, "/hup", "Update initiated~")
+
+        gateway_runner._handle_hup_command.assert_awaited_once_with(sent_event)
+        discord_adapter.handle_message.assert_not_awaited()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.edit_original_response.assert_awaited_once_with(content="Update initiated~")
+        interaction.delete_original_response.assert_not_awaited()
+
+    async def test_update_safe_alias_uses_same_hup_handler(self, discord_adapter):
+        """/update-safe should route through the same internal HUP handler."""
+        sent_event = object()
+        gateway_runner = MagicMock()
+        gateway_runner._handle_hup_command = AsyncMock(return_value="ok")
+        discord_adapter.gateway_runner = gateway_runner
+        discord_adapter.handle_message = AsyncMock()
+        discord_adapter._check_slash_authorization = AsyncMock(return_value=True)
+        discord_adapter._build_slash_event = MagicMock(return_value=sent_event)
+
+        interaction = MagicMock()
+        interaction.user = SimpleNamespace(name="alice", id=1)
+        interaction.channel = SimpleNamespace(id=123)
+        interaction.channel_id = 123
+        interaction.guild_id = 456
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        interaction.delete_original_response = AsyncMock()
+
+        await discord_adapter._run_hup_slash(interaction, "/update-safe", None)
+
+        gateway_runner._handle_hup_command.assert_awaited_once_with(sent_event)
+        discord_adapter.handle_message.assert_not_awaited()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.delete_original_response.assert_awaited_once()
