@@ -50,11 +50,6 @@ def _make_runner(hermes_home=None):
     runner._read_user_config = lambda: {
         "approvals": {"destructive_slash_confirm": False}
     }
-    # Provide a minimal config so that _check_slash_access (added in
-    # upstream a63a2b7c7) does not raise AttributeError on self.config.
-    # MagicMock makes policy_for_source return enabled=False, keeping the
-    # gate transparent in tests that don't exercise slash access control.
-    runner.config = MagicMock()
     return runner
 
 

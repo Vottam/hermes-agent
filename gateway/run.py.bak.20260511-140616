@@ -12456,21 +12456,6 @@ class GatewayRunner:
         if not git_dir.exists():
             return "✗ Not a git repository — cannot update."
 
-        try:
-            branch_result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=project_root, capture_output=True, text=True, timeout=5,
-            )
-            current_branch = branch_result.stdout.strip()
-        except Exception:
-            current_branch = ""
-
-        if current_branch == "mastertrend/overlays":
-            return (
-                "mastertrend/overlays uses overlay-aware updates; direct ff-only pull from origin/main is blocked. "
-                "Run the overlay refresh workflow or /hup overlay when implemented."
-            )
-
         hermes_home = _hermes_home
 
         # ── Step 1: Create snapshot ──────────────────────────────────────────

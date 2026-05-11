@@ -824,7 +824,6 @@ def build_environment_hints() -> str:
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
-SOUL_MD_MAX_CHARS = 8_000
 
 
 # =========================================================================
@@ -1323,7 +1322,7 @@ def load_soul_md() -> Optional[str]:
         if not content:
             return None
         content = _scan_context_content(content, "SOUL.md")
-        content = _truncate_content(content, "SOUL.md", max_chars=SOUL_MD_MAX_CHARS)
+        content = _truncate_content(content, "SOUL.md")
         return content
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
