@@ -279,6 +279,7 @@ export function StatusRule({
   model,
   modelFast,
   modelReasoningEffort,
+  provider,
   usage,
   bgCount,
   sessionStartedAt,
@@ -295,6 +296,7 @@ export function StatusRule({
     : usage.total > 0
       ? `${fmtK(usage.total)} tok`
       : ''
+  const providerLabel = provider.trim() ? provider.trim().toLowerCase() : ''
 
   const bar = usage.context_max ? ctxBar(pct) : ''
   const leftWidth = Math.max(12, cols - cwdLabel.length - 3)
@@ -310,6 +312,7 @@ export function StatusRule({
             <Text color={statusColor}>{status}</Text>
           )}
           <Text color={t.color.muted}> │ {modelLabel(model, modelReasoningEffort, modelFast)}</Text>
+          {providerLabel ? <Text color={t.color.muted}> │ {providerLabel}</Text> : null}
           {ctxLabel ? <Text color={t.color.muted}> │ {ctxLabel}</Text> : null}
           {bar ? (
             <Text color={t.color.muted}>
@@ -461,6 +464,7 @@ interface StatusRuleProps {
   model: string
   modelFast?: boolean
   modelReasoningEffort?: string
+  provider?: string
   sessionStartedAt?: null | number
   showCost: boolean
   status: string

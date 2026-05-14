@@ -1274,8 +1274,27 @@ def _sync_session_key_after_compress(
 
 def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
+    model_getter = getattr(agent, "get_display_model_name", None)
+    if callable(model_getter):
+        try:
+            model_value = model_getter() or ""
+        except Exception:
+            model_value = getattr(agent, "model", "") or ""
+    else:
+        model_value = getattr(agent, "model", "") or ""
+
+    context_length = 0
+    context_getter = getattr(agent, "get_display_context_length", None)
+    if callable(context_getter):
+        try:
+            context_length = context_getter() or 0
+        except Exception:
+            context_length = 0
+    if not context_length:
+        context_length = getattr(getattr(agent, "context_compressor", None), "context_length", 0) or 0
+
     usage = {
-        "model": getattr(agent, "model", "") or "",
+        "model": model_value,
         "input": g("session_input_tokens", "session_prompt_tokens"),
         "output": g("session_output_tokens", "session_completion_tokens"),
         "cache_read": g("session_cache_read_tokens"),
@@ -1289,12 +1308,16 @@ def _get_usage(agent) -> dict:
     comp = getattr(agent, "context_compressor", None)
     if comp:
         ctx_used = getattr(comp, "last_prompt_tokens", 0) or usage["total"] or 0
-        ctx_max = getattr(comp, "context_length", 0) or 0
+        ctx_max = context_length or getattr(comp, "context_length", 0) or 0
         if ctx_max:
             usage["context_used"] = ctx_used
             usage["context_max"] = ctx_max
             usage["context_percent"] = max(0, min(100, round(ctx_used / ctx_max * 100)))
         usage["compressions"] = getattr(comp, "compression_count", 0) or 0
+    elif context_length:
+        usage["context_used"] = usage["total"] or 0
+        usage["context_max"] = context_length
+        usage["context_percent"] = max(0, min(100, round((usage["context_used"] / context_length) * 100)))
     try:
         from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
@@ -1371,8 +1394,18 @@ def _session_info(agent) -> dict:
     ):
         reasoning_effort = str(reasoning_config.get("effort", "") or "")
     service_tier = getattr(agent, "service_tier", None) or ""
+    model_getter = getattr(agent, "get_display_model_name", None)
+    if callable(model_getter):
+        try:
+            resolved_model = model_getter() or ""
+        except Exception:
+            resolved_model = getattr(agent, "model", "") or ""
+    else:
+        resolved_model = getattr(agent, "model", "") or ""
+    provider = getattr(agent, "provider", "") or ""
     info: dict = {
-        "model": getattr(agent, "model", ""),
+        "model": resolved_model,
+        "provider": provider,
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
