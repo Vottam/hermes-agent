@@ -29,6 +29,8 @@ def _attach_agent(
     context_tokens: int,
     context_length: int,
     compressions: int = 0,
+    resolved_model: str | None = None,
+    resolved_context_length: int | None = None,
 ):
     cli_obj.agent = SimpleNamespace(
         model=cli_obj.model,
@@ -48,6 +50,9 @@ def _attach_agent(
             context_length=context_length,
             compression_count=compressions,
         ),
+        _resolved_model=resolved_model,
+        _resolved_context_model=resolved_model,
+        _resolved_context_length=resolved_context_length,
     )
     return cli_obj
 
@@ -80,6 +85,25 @@ class TestCLIStatusBar:
         assert "6%" in text
         assert "$0.06" not in text  # cost hidden by default
         assert "15m" in text
+
+    def test_build_status_bar_text_uses_resolved_model_metadata(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="anthropic/@preset/hermes"),
+            prompt_tokens=9_000,
+            completion_tokens=1_500,
+            total_tokens=10_500,
+            api_calls=4,
+            context_tokens=10_500,
+            context_length=256_000,
+            resolved_model="minimax/minimax-m2.5",
+            resolved_context_length=128_000,
+        )
+
+        text = cli_obj._build_status_bar_text(width=120)
+
+        assert "minimax-m2.5" in text
+        assert "128K" in text
+        assert "256K" not in text
 
     def test_input_height_counts_wide_characters_using_cell_width(self):
         cli_obj = _make_cli()

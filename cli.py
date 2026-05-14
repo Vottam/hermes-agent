@@ -2840,7 +2840,11 @@ class HermesCLI:
         # changes mid-session, so the TUI would show a stale name after
         # _try_activate_fallback() switches provider/model.
         agent = getattr(self, "agent", None)
-        model_name = (getattr(agent, "model", None) or self.model or "unknown")
+        model_name = getattr(agent, "_resolved_model", None)
+        if not model_name:
+            model_name = getattr(agent, "_resolved_context_model", None)
+        if not model_name:
+            model_name = getattr(agent, "model", None) or self.model or "unknown"
         model_short = model_name.split("/")[-1] if "/" in model_name else model_name
         if model_short.endswith(".gguf"):
             model_short = model_short[:-5]
@@ -2886,7 +2890,15 @@ class HermesCLI:
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
-            context_length = getattr(compressor, "context_length", 0) or 0
+            resolved_context_length = getattr(agent, "_resolved_context_length", None)
+            if resolved_context_length is not None:
+                context_length = resolved_context_length or 0
+            else:
+                context_getter = getattr(agent, "get_display_context_length", None)
+                if callable(context_getter):
+                    context_length = context_getter() or 0
+                else:
+                    context_length = getattr(compressor, "context_length", 0) or 0
             snapshot["context_tokens"] = context_tokens
             snapshot["context_length"] = context_length or None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0

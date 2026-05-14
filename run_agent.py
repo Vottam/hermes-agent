@@ -8692,6 +8692,23 @@ class AIAgent:
             raise result["error"]
         return result["response"]
 
+    def get_display_model_name(self) -> str:
+        """Return the runtime model label used by status surfaces."""
+        return (
+            getattr(self, "_resolved_model", None)
+            or getattr(self, "_resolved_context_model", None)
+            or getattr(self, "model", None)
+            or "unknown"
+        )
+
+    def get_display_context_length(self) -> int:
+        """Return the runtime context window used by status surfaces."""
+        resolved_context_length = getattr(self, "_resolved_context_length", None)
+        if resolved_context_length is not None:
+            return resolved_context_length or 0
+        compressor = getattr(self, "context_compressor", None)
+        return getattr(compressor, "context_length", 0) or 0
+
     # ── Provider fallback ──────────────────────────────────────────────────
 
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
@@ -13183,6 +13200,36 @@ class AIAgent:
                                 self._safe_print(f"{self.log_prefix}💾 Cached context length: {ctx:,} tokens for {self.model}")
                             self.context_compressor._context_probed = False
                             self.context_compressor._context_probe_persistable = False
+
+                        resolved_model = getattr(response, "model", None)
+                        if resolved_model:
+                            self._resolved_model = resolved_model
+                            self._resolved_context_model = resolved_model
+                            try:
+                                from agent.model_metadata import get_model_context_length
+                                resolved_context_length = get_model_context_length(
+                                    resolved_model,
+                                    base_url=self.base_url,
+                                    api_key=getattr(self, "api_key", ""),
+                                    config_context_length=getattr(self, "_config_context_length", None),
+                                    provider=self.provider,
+                                    custom_providers=getattr(self, "_custom_providers", None),
+                                )
+                            except Exception:
+                                resolved_context_length = None
+
+                            if isinstance(resolved_context_length, int) and resolved_context_length > 0:
+                                self._resolved_context_length = resolved_context_length
+                                cc = getattr(self, "context_compressor", None)
+                                if cc is not None:
+                                    cc.update_model(
+                                        model=resolved_model,
+                                        context_length=resolved_context_length,
+                                        base_url=self.base_url,
+                                        api_key=getattr(self, "api_key", ""),
+                                        provider=self.provider,
+                                        api_mode=self.api_mode,
+                                    )
 
                         self.session_prompt_tokens += prompt_tokens
                         self.session_completion_tokens += completion_tokens
