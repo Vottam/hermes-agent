@@ -245,6 +245,17 @@ const shortModelLabel = (model: string) =>
 const modelLabel = (model: string, effort?: string, fast?: boolean) =>
   [shortModelLabel(model), effortLabel(effort), fast ? 'fast' : ''].filter(Boolean).join(' ')
 
+const shortProviderLabel = (provider: string) => {
+  if (!provider) return ''
+  // Remove common aggregator prefixes for display brevity
+  const name = provider
+    .replace(/^(openrouter|openai)\//, '')
+    .replace(/^(google[-_])?(gemini|ai[-_]studio)\/?/, 'gemini')
+    .replace(/^anthropic\/?/, '')
+    .trim()
+  return name
+}
+
 export function GoodVibesHeart({ tick, t }: { tick: number; t: Theme }) {
   const [active, setActive] = useState(false)
   const [color, setColor] = useState(t.color.accent)
@@ -279,6 +290,7 @@ export function StatusRule({
   model,
   modelFast,
   modelReasoningEffort,
+  provider,
   usage,
   bgCount,
   sessionStartedAt,
@@ -310,6 +322,7 @@ export function StatusRule({
             <Text color={statusColor}>{status}</Text>
           )}
           <Text color={t.color.muted}> │ {modelLabel(model, modelReasoningEffort, modelFast)}</Text>
+          {provider ? <Text color={t.color.muted}> · {shortProviderLabel(provider)}</Text> : null}
           {ctxLabel ? <Text color={t.color.muted}> │ {ctxLabel}</Text> : null}
           {bar ? (
             <Text color={t.color.muted}>
@@ -461,6 +474,7 @@ interface StatusRuleProps {
   model: string
   modelFast?: boolean
   modelReasoningEffort?: string
+  provider?: string
   sessionStartedAt?: null | number
   showCost: boolean
   status: string

@@ -777,7 +777,8 @@ def _resolve_model() -> str:
         return env
     m = _load_cfg().get("model", "")
     if isinstance(m, dict):
-        return str(m.get("default", "") or "").strip()
+        result = str(m.get("default", "") or "").strip()
+        return result
     if isinstance(m, str) and m:
         return m.strip()
     return "anthropic/claude-sonnet-4"
@@ -1371,8 +1372,11 @@ def _session_info(agent) -> dict:
     ):
         reasoning_effort = str(reasoning_config.get("effort", "") or "")
     service_tier = getattr(agent, "service_tier", None) or ""
+    _agent_model = getattr(agent, "model", "")
+    _agent_provider = getattr(agent, "provider", "")
     info: dict = {
-        "model": getattr(agent, "model", ""),
+        "model": _agent_model,
+        "provider": _agent_provider,
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
