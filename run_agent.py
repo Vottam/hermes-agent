@@ -1304,6 +1304,8 @@ class AIAgent:
         else:
             self.api_mode = "chat_completions"
 
+        self._resolved_provider = self.provider
+
         # Eagerly warm the transport cache so import errors surface at init,
         # not mid-conversation.  Also validates the api_mode is registered.
         try:
@@ -1745,6 +1747,7 @@ class AIAgent:
                             )
                             if _fb_client is not None:
                                 self.provider = _fb["provider"]
+                                self._resolved_provider = self.provider
                                 self.model = _fb_model or _fb["model"]
                                 self._fallback_activated = True
                                 client_kwargs = {
@@ -2656,6 +2659,7 @@ class AIAgent:
         # ── Swap core runtime fields ──
         self.model = new_model
         self.provider = new_provider
+        self._resolved_provider = self.provider
         # Use new base_url when provided; only fall back to current when the
         # new provider genuinely has no endpoint (e.g. native SDK providers).
         # Without this guard the old provider's URL (e.g. Ollama's localhost
@@ -8701,6 +8705,10 @@ class AIAgent:
             or "unknown"
         )
 
+    def get_display_provider_name(self) -> str:
+        """Return the runtime provider label used by status surfaces."""
+        return getattr(self, "_resolved_provider", None) or getattr(self, "provider", None) or ""
+
     def get_display_context_length(self) -> int:
         """Return the runtime context window used by status surfaces."""
         resolved_context_length = getattr(self, "_resolved_context_length", None)
@@ -8841,6 +8849,7 @@ class AIAgent:
             self._config_context_length = None
             self.model = fb_model
             self.provider = fb_provider
+            self._resolved_provider = self.provider
             self.base_url = fb_base_url
             self.api_mode = fb_api_mode
             if hasattr(self, "_transport_cache"):
@@ -8964,6 +8973,7 @@ class AIAgent:
             # ── Core runtime state ──
             self.model = rt["model"]
             self.provider = rt["provider"]
+            self._resolved_provider = self.provider
             self.base_url = rt["base_url"]           # setter updates _base_url_lower
             self.api_mode = rt["api_mode"]
             if hasattr(self, "_transport_cache"):
@@ -9072,6 +9082,7 @@ class AIAgent:
             self._client_kwargs = dict(rt["client_kwargs"])
             self.model = rt["model"]
             self.provider = rt["provider"]
+            self._resolved_provider = self.provider
             self.base_url = rt["base_url"]
             self.api_mode = rt["api_mode"]
             if hasattr(self, "_transport_cache"):

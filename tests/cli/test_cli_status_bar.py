@@ -20,6 +20,7 @@ def _attach_agent(
     *,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    provider: str | None = None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     prompt_tokens: int,
@@ -32,9 +33,10 @@ def _attach_agent(
     resolved_model: str | None = None,
     resolved_context_length: int | None = None,
 ):
+    provider_name = provider if provider is not None else ("anthropic" if cli_obj.model.startswith("anthropic/") else "")
     cli_obj.agent = SimpleNamespace(
         model=cli_obj.model,
-        provider="anthropic" if cli_obj.model.startswith("anthropic/") else None,
+        provider=provider_name,
         base_url="",
         session_input_tokens=input_tokens if input_tokens is not None else prompt_tokens,
         session_output_tokens=output_tokens if output_tokens is not None else completion_tokens,
@@ -50,9 +52,11 @@ def _attach_agent(
             context_length=context_length,
             compression_count=compressions,
         ),
+        _resolved_provider=provider_name,
         _resolved_model=resolved_model,
         _resolved_context_model=resolved_model,
         _resolved_context_length=resolved_context_length,
+        get_display_provider_name=lambda: provider_name,
     )
     return cli_obj
 
@@ -70,6 +74,7 @@ class TestCLIStatusBar:
     def test_build_status_bar_text_for_wide_terminal(self):
         cli_obj = _attach_agent(
             _make_cli(),
+            provider="openrouter",
             prompt_tokens=10_230,
             completion_tokens=2_220,
             total_tokens=12_450,
@@ -81,6 +86,7 @@ class TestCLIStatusBar:
         text = cli_obj._build_status_bar_text(width=120)
 
         assert "claude-sonnet-4-20250514" in text
+        assert "openrouter" in text
         assert "12.4K/200K" in text
         assert "6%" in text
         assert "$0.06" not in text  # cost hidden by default
@@ -89,6 +95,7 @@ class TestCLIStatusBar:
     def test_build_status_bar_text_uses_resolved_model_metadata(self):
         cli_obj = _attach_agent(
             _make_cli(model="anthropic/@preset/hermes"),
+            provider="openai-codex",
             prompt_tokens=9_000,
             completion_tokens=1_500,
             total_tokens=10_500,
@@ -102,8 +109,30 @@ class TestCLIStatusBar:
         text = cli_obj._build_status_bar_text(width=120)
 
         assert "minimax-m2.5" in text
+        assert "openai-codex" in text
         assert "128K" in text
         assert "256K" not in text
+
+    def test_get_status_bar_fragments_show_provider_before_context(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            provider="openrouter",
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+        )
+        cli_obj._status_bar_visible = True
+        cli_obj._model_picker_state = None
+        cli_obj._get_tui_terminal_width = lambda: 120
+
+        fragments = cli_obj._get_status_bar_fragments()
+        text = "".join(fragment for _style, fragment in fragments)
+
+        assert "openrouter" in text
+        assert text.index("claude-sonnet-4-20250514") < text.index("openrouter") < text.index("12.4K/200K")
 
     def test_input_height_counts_wide_characters_using_cell_width(self):
         cli_obj = _make_cli()
@@ -230,10 +259,29 @@ class TestCLIStatusBar:
 
         assert "⚕" in text
         assert "claude-sonnet-4-20250514" in text
+        assert "openrouter" not in text
+
+    def test_build_status_bar_text_omits_provider_when_missing(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            provider="",
+            prompt_tokens=10000,
+            completion_tokens=2400,
+            total_tokens=12400,
+            api_calls=7,
+            context_tokens=12400,
+            context_length=200_000,
+        )
+
+        text = cli_obj._build_status_bar_text(width=120)
+
+        assert "│ 12.4K/200K" in text or "12.4K/200K" in text
+        assert "openrouter" not in text
 
     def test_compression_count_shown_in_wide_status_bar(self):
         cli_obj = _attach_agent(
             _make_cli(),
+            provider="openrouter",
             prompt_tokens=10_230,
             completion_tokens=2_220,
             total_tokens=12_450,
@@ -250,6 +298,7 @@ class TestCLIStatusBar:
     def test_compression_count_hidden_when_zero(self):
         cli_obj = _attach_agent(
             _make_cli(),
+            provider="openrouter",
             prompt_tokens=10_230,
             completion_tokens=2_220,
             total_tokens=12_450,
@@ -317,13 +366,14 @@ class TestCLIStatusBar:
             compressions=7,
         )
         cli_obj._status_bar_visible = True
+        cli_obj._get_tui_terminal_width = lambda: 120
 
         frags = cli_obj._get_status_bar_fragments()
-        frag_texts = [text for _, text in frags]
+        frag_text = "".join(text for _, text in frags)
 
-        assert "🗜️ 7" in frag_texts
-        frag_styles = {text: style for style, text in frags}
-        assert frag_styles["🗜️ 7"] == "class:status-bar-warn"
+        assert "🗜️ 7" in frag_text
+        frag_style = next(style for style, text in frags if "🗜️ 7" in text)
+        assert frag_style == "class:status-bar-warn"
 
     def test_compression_count_absent_from_fragments_when_zero(self):
         cli_obj = _attach_agent(
