@@ -18,6 +18,10 @@ def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
 def _attach_agent(
     cli_obj,
     *,
+    provider_name: str | None = None,
+    resolved_provider: str | None = None,
+    resolved_model: str | None = None,
+    resolved_context_length: int | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     cache_read_tokens: int = 0,
@@ -30,9 +34,15 @@ def _attach_agent(
     context_length: int,
     compressions: int = 0,
 ):
+    provider_name = provider_name or ("anthropic" if cli_obj.model.startswith("anthropic/") else None)
+    resolved_provider = provider_name if resolved_provider is None else resolved_provider
+    resolved_model = resolved_model or cli_obj.model
     cli_obj.agent = SimpleNamespace(
-        model=cli_obj.model,
-        provider="anthropic" if cli_obj.model.startswith("anthropic/") else None,
+        model=resolved_model,
+        _resolved_model=resolved_model,
+        _resolved_context_model=resolved_model,
+        provider=provider_name,
+        _resolved_provider=resolved_provider,
         base_url="",
         session_input_tokens=input_tokens if input_tokens is not None else prompt_tokens,
         session_output_tokens=output_tokens if output_tokens is not None else completion_tokens,
@@ -45,10 +55,12 @@ def _attach_agent(
         get_rate_limit_state=lambda: None,
         context_compressor=SimpleNamespace(
             last_prompt_tokens=context_tokens,
-            context_length=context_length,
+            context_length=resolved_context_length if resolved_context_length is not None else context_length,
             compression_count=compressions,
         ),
     )
+    if resolved_context_length is not None:
+        cli_obj.agent._resolved_context_length = resolved_context_length
     return cli_obj
 
 
@@ -64,22 +76,43 @@ class TestCLIStatusBar:
 
     def test_build_status_bar_text_for_wide_terminal(self):
         cli_obj = _attach_agent(
-            _make_cli(),
+            _make_cli(model="gpt-5.4-mini-2026-03-17"),
+            provider_name="openai-codex",
             prompt_tokens=10_230,
             completion_tokens=2_220,
             total_tokens=12_450,
             api_calls=7,
-            context_tokens=12_450,
-            context_length=200_000,
+            context_tokens=29_500,
+            context_length=272_000,
         )
 
         text = cli_obj._build_status_bar_text(width=120)
 
-        assert "claude-sonnet-4-20250514" in text
-        assert "12.4K/200K" in text
-        assert "6%" in text
+        assert "gpt-5.4-mini-2026-03-17" in text
+        assert "openai-codex" in text
+        assert "29.5K/272K" in text
+        assert "11%" in text
         assert "$0.06" not in text  # cost hidden by default
         assert "15m" in text
+
+    def test_provider_label_shown_in_wide_fragments(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="gpt-5.4-mini-2026-03-17"),
+            provider_name="openai-codex",
+            prompt_tokens=29_500,
+            completion_tokens=2_220,
+            total_tokens=31_720,
+            api_calls=7,
+            context_tokens=29_500,
+            context_length=272_000,
+        )
+        cli_obj._status_bar_visible = True
+
+        frags = cli_obj._get_status_bar_fragments()
+        frag_texts = "".join(text for _, text in frags)
+
+        assert "openai-codex" in frag_texts
+        assert "gpt-5.4-mini-2026-03-17" in frag_texts
 
     def test_input_height_counts_wide_characters_using_cell_width(self):
         cli_obj = _make_cli()
@@ -292,10 +325,11 @@ class TestCLIStatusBar:
             context_length=200_000,
             compressions=7,
         )
+        cli_obj._get_tui_terminal_width = lambda: 200
         cli_obj._status_bar_visible = True
 
         frags = cli_obj._get_status_bar_fragments()
-        frag_texts = [text for _, text in frags]
+        frag_texts = "".join(text for _, text in frags)
 
         assert "🗜️ 7" in frag_texts
         frag_styles = {text: style for style, text in frags}

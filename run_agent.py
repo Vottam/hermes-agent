@@ -1304,6 +1304,8 @@ class AIAgent:
         else:
             self.api_mode = "chat_completions"
 
+        self._resolved_provider = self.provider
+
         # Eagerly warm the transport cache so import errors surface at init,
         # not mid-conversation.  Also validates the api_mode is registered.
         try:
@@ -1745,6 +1747,7 @@ class AIAgent:
                             )
                             if _fb_client is not None:
                                 self.provider = _fb["provider"]
+                                self._resolved_provider = self.provider
                                 self.model = _fb_model or _fb["model"]
                                 self._fallback_activated = True
                                 client_kwargs = {
@@ -2656,6 +2659,7 @@ class AIAgent:
         # ── Swap core runtime fields ──
         self.model = new_model
         self.provider = new_provider
+        self._resolved_provider = self.provider
         # Use new base_url when provided; only fall back to current when the
         # new provider genuinely has no endpoint (e.g. native SDK providers).
         # Without this guard the old provider's URL (e.g. Ollama's localhost
@@ -8826,6 +8830,7 @@ class AIAgent:
             self._config_context_length = None
             self.model = fb_model
             self.provider = fb_provider
+            self._resolved_provider = self.provider
             self.base_url = fb_base_url
             self.api_mode = fb_api_mode
             if hasattr(self, "_transport_cache"):
@@ -8949,6 +8954,7 @@ class AIAgent:
             # ── Core runtime state ──
             self.model = rt["model"]
             self.provider = rt["provider"]
+            self._resolved_provider = self.provider
             self.base_url = rt["base_url"]           # setter updates _base_url_lower
             self.api_mode = rt["api_mode"]
             if hasattr(self, "_transport_cache"):
@@ -9057,6 +9063,7 @@ class AIAgent:
             self._client_kwargs = dict(rt["client_kwargs"])
             self.model = rt["model"]
             self.provider = rt["provider"]
+            self._resolved_provider = self.provider
             self.base_url = rt["base_url"]
             self.api_mode = rt["api_mode"]
             if hasattr(self, "_transport_cache"):
@@ -12971,6 +12978,55 @@ class AIAgent:
                                     f"{int(sleep_end - time.time())}s remaining"
                                 )
                         continue  # Retry the API call
+
+                    # Capture the actual model returned by the provider
+                    # (e.g. OpenRouter resolves @preset/hermes → minimax/minimax-m2.5)
+                    if (
+                        not response_invalid
+                        and response
+                        and hasattr(response, "model")
+                        and response.model
+                    ):
+                        _resp_model = response.model.strip()
+                        if _resp_model and _resp_model != self.model:
+                            self._resolved_model = _resp_model
+
+                            # Update context window from the real resolved model
+                            # so the compressor uses the correct context length
+                            # (e.g. 128K instead of 256K for @preset/hermes).
+                            try:
+                                _prev_resolved = getattr(self, "_resolved_context_model", None)
+                                if _resp_model == _prev_resolved:
+                                    pass  # already resolved for this model
+                                else:
+                                    from agent.model_metadata import get_model_context_length
+                                    _real_ctx = None
+                                    _real_ctx = get_model_context_length(
+                                        _resp_model,
+                                        base_url=self.base_url,
+                                        api_key=getattr(self, "api_key", ""),
+                                        config_context_length=getattr(
+                                            self, "_config_context_length", None
+                                        ),
+                                        provider=self.provider,
+                                    )
+                                    if isinstance(_real_ctx, int) and _real_ctx > 0:
+                                        self._resolved_context_length = _real_ctx
+                                        self._resolved_context_model = _resp_model
+                                        _compressor = getattr(
+                                            self, "context_compressor", None
+                                        )
+                                        if _compressor and hasattr(
+                                            _compressor, "update_model"
+                                        ):
+                                            _compressor.update_model(
+                                                model=_resp_model,
+                                                context_length=_real_ctx,
+                                                base_url=self.base_url,
+                                                api_key=getattr(self, "api_key", ""),
+                                            )
+                            except Exception:
+                                pass  # keep current context
 
                     # Check finish_reason before proceeding
                     if self.api_mode == "codex_responses":
