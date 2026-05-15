@@ -2,6 +2,7 @@
 
 from argparse import Namespace
 from unittest.mock import MagicMock, patch
+import io
 
 import pytest
 from hermes_cli.config import DEFAULT_CONFIG, load_config, save_config
@@ -65,6 +66,81 @@ class TestNonInteractiveSetup:
 
         mock_run_setup.assert_called_once_with(args)
 
+    def test_interactive_probe_accepts_openable_dev_tty(self):
+        """The wizard should continue when stdin is piped but /dev/tty can be opened."""
+        from hermes_cli.setup import is_interactive_stdin
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+
+        tty_reader = MagicMock()
+        tty_writer = MagicMock()
+
+        with (
+            patch("sys.stdin", mock_stdin),
+            patch("builtins.open", side_effect=[tty_reader, tty_writer]),
+        ):
+            assert is_interactive_stdin() is True
+
+    def test_prompt_uses_dev_tty_when_stdin_is_headless(self):
+        """Plain text prompts should read from /dev/tty when stdin is unavailable."""
+        from hermes_cli.setup import prompt
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+        tty_in = io.StringIO("open-router\n")
+        tty_out = io.StringIO()
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            assert path == "/dev/tty"
+            return tty_in if "r" in mode else tty_out
+
+        with (
+            patch("sys.stdin", mock_stdin),
+            patch("builtins.input", side_effect=AssertionError("input() should not be used")),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            assert prompt("  Provider") == "open-router"
+
+    def test_open_tty_streams_closes_reader_if_writer_open_fails(self):
+        """Opening /dev/tty twice should not leak the read handle if the second open fails."""
+        from hermes_cli.setup import _open_tty_streams
+
+        tty_reader = MagicMock()
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            assert path == "/dev/tty"
+            if "r" in mode:
+                return tty_reader
+            raise OSError("writer unavailable")
+
+        with patch("builtins.open", side_effect=fake_open):
+            assert _open_tty_streams() == (None, None)
+
+        tty_reader.close.assert_called_once()
+
+    def test_prompt_checklist_uses_numbered_fallback_when_stdin_is_headless(self):
+        """Checklist prompts should still work through the tty-backed text fallback."""
+        from hermes_cli.setup import prompt_checklist
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = False
+        tty_in = io.StringIO("1, 3\n")
+        tty_out = io.StringIO()
+
+        def fake_open(path, mode="r", *args, **kwargs):
+            assert path == "/dev/tty"
+            return tty_in if "r" in mode else tty_out
+
+        with (
+            patch("sys.stdin", mock_stdin),
+            patch("builtins.input", side_effect=AssertionError("input() should not be used")),
+            patch("builtins.open", side_effect=fake_open),
+        ):
+            chosen = prompt_checklist("Select items:", ["alpha", "beta", "gamma"], [1])
+
+        assert chosen == [0, 2]
+
     def test_non_interactive_flag_skips_wizard(self, capsys):
         """--non-interactive should print guidance and not enter the wizard."""
         from hermes_cli.setup import run_setup_wizard
@@ -84,7 +160,7 @@ class TestNonInteractiveSetup:
         assert "hermes config set model.provider custom" in out
 
     def test_no_tty_skips_wizard(self, capsys):
-        """When stdin has no TTY, the setup wizard should print guidance and return."""
+        """When stdin has no TTY and /dev/tty is unavailable, the wizard should exit with guidance."""
         from hermes_cli.setup import run_setup_wizard
 
         args = _make_setup_args(non_interactive=False)

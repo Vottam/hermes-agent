@@ -163,8 +163,8 @@ from hermes_cli.cli_output import (  # noqa: E402
 )
 
 
-def is_interactive_stdin() -> bool:
-    """Return True when stdin looks like a usable interactive TTY."""
+def _stdin_is_tty() -> bool:
+    """Return True when stdin is attached to a real terminal."""
     stdin = getattr(sys, "stdin", None)
     if stdin is None:
         return False
@@ -172,6 +172,68 @@ def is_interactive_stdin() -> bool:
         return bool(stdin.isatty())
     except Exception:
         return False
+
+
+def _open_tty_streams():
+    """Open /dev/tty for prompt input/output when stdin is redirected."""
+    try:
+        tty_in = open("/dev/tty", "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+
+    try:
+        tty_out = open("/dev/tty", "w", encoding="utf-8", errors="replace")
+    except OSError:
+        try:
+            tty_in.close()
+        except Exception:
+            pass
+        return None, None
+
+    return tty_in, tty_out
+
+
+def _read_line_from_tty(prompt_text: str) -> str:
+    """Read a single line from /dev/tty with the given prompt."""
+    tty_in, tty_out = _open_tty_streams()
+    if tty_in is None or tty_out is None:
+        raise EOFError
+    try:
+        tty_out.write(prompt_text)
+        tty_out.flush()
+        value = tty_in.readline()
+        if value == "":
+            raise EOFError
+        return value
+    finally:
+        try:
+            tty_in.close()
+        except Exception:
+            pass
+        try:
+            tty_out.close()
+        except Exception:
+            pass
+
+
+def is_interactive_stdin() -> bool:
+    """Return True when a usable interactive terminal is available."""
+    if _stdin_is_tty():
+        return True
+    tty_in, tty_out = _open_tty_streams()
+    if tty_in is None or tty_out is None:
+        return False
+    try:
+        return True
+    finally:
+        try:
+            tty_in.close()
+        except Exception:
+            pass
+        try:
+            tty_out.close()
+        except Exception:
+            pass
 
 
 def print_noninteractive_setup_guidance(reason: str | None = None) -> None:
@@ -204,16 +266,34 @@ def prompt(question: str, default: str = None, password: bool = False) -> str:
         if password:
             import getpass
 
-            value = getpass.getpass(color(display, Colors.YELLOW))
+            if _stdin_is_tty():
+                value = getpass.getpass(color(display, Colors.YELLOW))
+            else:
+                tty_in, tty_out = _open_tty_streams()
+                if tty_in is None or tty_out is None:
+                    raise EOFError
+                try:
+                    value = getpass.getpass(color(display, Colors.YELLOW), stream=tty_out)
+                finally:
+                    try:
+                        tty_in.close()
+                    except Exception:
+                        pass
+                    try:
+                        tty_out.close()
+                    except Exception:
+                        pass
         else:
-            value = input(color(display, Colors.YELLOW))
+            if _stdin_is_tty():
+                value = input(color(display, Colors.YELLOW))
+            else:
+                value = _read_line_from_tty(color(display, Colors.YELLOW))
 
         cleaned = _sanitize_pasted_input(value)
         return cleaned.strip() or default or ""
     except (KeyboardInterrupt, EOFError):
         print()
         sys.exit(1)
-
 
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 
@@ -229,7 +309,6 @@ def _curses_prompt_choice(question: str, choices: list, default: int = 0, descri
     """Single-select menu using curses. Delegates to curses_radiolist."""
     from hermes_cli.curses_ui import curses_radiolist
     return curses_radiolist(question, choices, selected=default, cancel_returns=-1, description=description)
-
 
 
 def prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:
@@ -259,9 +338,7 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
 
     while True:
         try:
-            value = input(
-                color(f"  Select [1-{len(choices)}] ({default + 1}): ", Colors.DIM)
-            )
+            value = prompt(f"  Select [1-{len(choices)}] ({default + 1})", "")
             if not value:
                 return default
             idx = int(value) - 1
@@ -282,7 +359,7 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
     while True:
         try:
             value = (
-                input(color(f"{question} [{default_str}]: ", Colors.YELLOW))
+                prompt(question, default_str)
                 .strip()
                 .lower()
             )
@@ -296,6 +373,8 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
             return True
         if value in {"n", "no"}:
             return False
+        if value == default_str.lower():
+            return default
         print_error("Please enter 'y' or 'n'")
 
 
@@ -319,13 +398,45 @@ def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list
 
     from hermes_cli.curses_ui import curses_checklist
 
-    chosen = curses_checklist(
-        title,
-        items,
-        set(pre_selected),
-        cancel_returns=set(pre_selected),
-    )
-    return sorted(chosen)
+    if _stdin_is_tty():
+        chosen = curses_checklist(
+            title,
+            items,
+            set(pre_selected),
+            cancel_returns=set(pre_selected),
+        )
+        return sorted(chosen)
+
+    print(color(title, Colors.YELLOW))
+    for i, item in enumerate(items, start=1):
+        marker = "✓" if (i - 1) in pre_selected else " "
+        print(f"  {i}. [{marker}] {item}")
+    print_info("  Enter comma-separated numbers (e.g. 1,3). Empty keeps the current selection.")
+
+    while True:
+        try:
+            raw = prompt("  Selection", "").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            sys.exit(1)
+
+        if not raw:
+            return sorted(pre_selected)
+
+        try:
+            chosen: list[int] = []
+            for part in raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                idx = int(part) - 1
+                if 0 <= idx < len(items) and idx not in chosen:
+                    chosen.append(idx)
+            if chosen:
+                return chosen
+            print_error(f"Please enter one or more numbers between 1 and {len(items)}")
+        except ValueError:
+            print_error("Please enter comma-separated numbers like 1,3")
 
 
 def _prompt_api_key(var: dict):
