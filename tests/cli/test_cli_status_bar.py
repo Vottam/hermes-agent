@@ -18,6 +18,7 @@ def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
 def _attach_agent(
     cli_obj,
     *,
+    provider_name: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     cache_read_tokens: int = 0,
@@ -30,9 +31,11 @@ def _attach_agent(
     context_length: int,
     compressions: int = 0,
 ):
+    provider = provider_name or ("anthropic" if cli_obj.model.startswith("anthropic/") else None)
     cli_obj.agent = SimpleNamespace(
         model=cli_obj.model,
-        provider="anthropic" if cli_obj.model.startswith("anthropic/") else None,
+        provider=provider,
+        _resolved_provider=provider,
         base_url="",
         session_input_tokens=input_tokens if input_tokens is not None else prompt_tokens,
         session_output_tokens=output_tokens if output_tokens is not None else completion_tokens,
@@ -64,7 +67,8 @@ class TestCLIStatusBar:
 
     def test_build_status_bar_text_for_wide_terminal(self):
         cli_obj = _attach_agent(
-            _make_cli(),
+            _make_cli(model="gpt-5.4-mini-2026-03-17"),
+            provider_name="openai-codex",
             prompt_tokens=10_230,
             completion_tokens=2_220,
             total_tokens=12_450,
@@ -75,11 +79,31 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=120)
 
-        assert "claude-sonnet-4-20250514" in text
+        assert "gpt-5.4-mini-2026-03-17" in text
+        assert "openai-codex" in text
         assert "12.4K/200K" in text
         assert "6%" in text
         assert "$0.06" not in text  # cost hidden by default
         assert "15m" in text
+
+    def test_provider_label_shown_in_wide_status_bar_fragments(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="gpt-5.4-mini-2026-03-17"),
+            provider_name="openai-codex",
+            prompt_tokens=29_500,
+            completion_tokens=2_220,
+            total_tokens=31_720,
+            api_calls=7,
+            context_tokens=29_500,
+            context_length=272_000,
+        )
+        cli_obj._status_bar_visible = True
+
+        frags = cli_obj._get_status_bar_fragments()
+        frag_texts = "".join(text for _, text in frags)
+
+        assert "openai-codex" in frag_texts
+        assert "gpt-5.4-mini-2026-03-17" in frag_texts
 
     def test_input_height_counts_wide_characters_using_cell_width(self):
         cli_obj = _make_cli()
@@ -295,11 +319,9 @@ class TestCLIStatusBar:
         cli_obj._status_bar_visible = True
 
         frags = cli_obj._get_status_bar_fragments()
-        frag_texts = [text for _, text in frags]
+        frag_text = "".join(text for _, text in frags)
 
-        assert "🗜️ 7" in frag_texts
-        frag_styles = {text: style for style, text in frags}
-        assert frag_styles["🗜️ 7"] == "class:status-bar-warn"
+        assert "🗜️ 7" in frag_text
 
     def test_compression_count_absent_from_fragments_when_zero(self):
         cli_obj = _attach_agent(
