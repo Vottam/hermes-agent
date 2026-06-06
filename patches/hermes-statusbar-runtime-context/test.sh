@@ -8,8 +8,10 @@ set -euo pipefail
 
 PASS=0
 FAIL=0
+WARN=0
 
 ok()  { echo "  [PASS] $1"; PASS=$((PASS+1)); }
+warn() { echo "  [WARN] $1"; WARN=$((WARN+1)); }
 fail() { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
 
 echo "=== Testes: hermes-statusbar-runtime-context ==="
@@ -22,7 +24,23 @@ if [ -z "${HERMES_PATH}" ]; then
     exit 1
 fi
 HERMES_DIR=$(dirname "$(dirname "$(dirname "${HERMES_PATH}")")")
-PY_BIN="${HERMES_DIR}/venv/bin/python"
+
+# Detectar Python: venv -> .venv -> python3
+PY_BIN=""
+for candidate in \
+    "${HERMES_DIR}/venv/bin/python" \
+    "${HERMES_DIR}/.venv/bin/python" \
+    "$(command -v python3 2>/dev/null)"; do
+    if [ -x "${candidate}" ]; then
+        PY_BIN="${candidate}"
+        break
+    fi
+done
+if [ -z "${PY_BIN}" ]; then
+    echo "[FAIL] Python não encontrado (tentou venv, .venv, python3)"
+    exit 1
+fi
+
 cd "${HERMES_DIR}"
 
 # T1: Arquivos modificados existem e têm as funções esperadas
@@ -140,10 +158,13 @@ fi
 # Resumo
 echo ""
 echo "=== Resumo ==="
-echo "  PASS: ${PASS}  FAIL: ${FAIL}"
+echo "  PASS: ${PASS}  WARN: ${WARN}  FAIL: ${FAIL}"
 if [ "${FAIL}" -gt 0 ]; then
     echo "  Veredicto: FAIL"
     exit 1
+elif [ "${WARN}" -gt 0 ]; then
+    echo "  Veredicto: WARN"
+    exit 0
 else
     echo "  Veredicto: PASS"
     exit 0

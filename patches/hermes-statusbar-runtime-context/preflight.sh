@@ -113,11 +113,20 @@ fi
 
 # 9. Python compilável
 echo "-- Python --"
-PY_BIN="${HERMES_DIR}/venv/bin/python"
-if [ -x "${PY_BIN}" ]; then
-    ok "Python venv: ${PY_BIN}"
+PY_BIN=""
+for candidate in \
+    "${HERMES_DIR}/venv/bin/python" \
+    "${HERMES_DIR}/.venv/bin/python" \
+    "$(command -v python3 2>/dev/null)"; do
+    if [ -x "${candidate}" ]; then
+        PY_BIN="${candidate}"
+        break
+    fi
+done
+if [ -n "${PY_BIN}" ]; then
+    ok "Python encontrado: ${PY_BIN}"
 else
-    warn "Python venv não encontrado em ${PY_BIN}"
+    warn "Python não encontrado (tentou venv, .venv, python3)"
 fi
 
 # Resumo

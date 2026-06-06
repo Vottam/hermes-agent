@@ -59,7 +59,20 @@ FILES=(
     "cli.py"
     "run_agent.py"
 )
-PY_BIN="${HERMES_DIR}/venv/bin/python"
+PY_BIN=""
+for candidate in \
+    "${HERMES_DIR}/venv/bin/python" \
+    "${HERMES_DIR}/.venv/bin/python" \
+    "$(command -v python3 2>/dev/null)"; do
+    if [ -x "${candidate}" ]; then
+        PY_BIN="${candidate}"
+        break
+    fi
+done
+if [ -z "${PY_BIN}" ]; then
+    echo "  [FAIL] Python não encontrado (tentou venv, .venv, python3)"
+    exit 1
+fi
 for f in "${FILES[@]}"; do
     if ${PY_BIN} -m py_compile "${f}" 2>/dev/null; then
         echo "  [OK] ${f}"
