@@ -4074,6 +4074,27 @@ class AIAgent:
         from agent.chat_completion_helpers import interruptible_streaming_api_call
         return interruptible_streaming_api_call(self, api_kwargs, on_first_delta=on_first_delta)
 
+    def get_display_model_name(self) -> str:
+        """Return the runtime model label used by status surfaces."""
+        return (
+            getattr(self, "_resolved_model", None)
+            or getattr(self, "_resolved_context_model", None)
+            or getattr(self, "model", None)
+            or "unknown"
+        )
+
+    def get_display_provider_name(self) -> str:
+        """Return the runtime provider label used by status surfaces."""
+        return getattr(self, "_resolved_provider", None) or getattr(self, "provider", None) or ""
+
+    def get_display_context_length(self) -> int:
+        """Return the runtime context window used by status surfaces."""
+        resolved_context_length = getattr(self, "_resolved_context_length", None)
+        if resolved_context_length is not None:
+            return resolved_context_length or 0
+        compressor = getattr(self, "context_compressor", None)
+        return getattr(compressor, "context_length", 0) or 0
+
     def _try_activate_fallback(self, reason: "FailoverReason | None" = None) -> bool:
         """Forwarder — see ``agent.chat_completion_helpers.try_activate_fallback``."""
         from agent.chat_completion_helpers import try_activate_fallback

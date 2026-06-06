@@ -1927,6 +1927,37 @@ def run_conversation(
                         agent.context_compressor._context_probed = False
                         agent.context_compressor._context_probe_persistable = False
 
+                    # ── Resolve real model + context from API response ──
+                    resolved_model = getattr(response, "model", None)
+                    if resolved_model:
+                        agent._resolved_model = resolved_model
+                        agent._resolved_context_model = resolved_model
+                        try:
+                            from agent.model_metadata import get_model_context_length
+                            resolved_context_length = get_model_context_length(
+                                resolved_model,
+                                base_url=agent.base_url,
+                                api_key=getattr(agent, "api_key", ""),
+                                config_context_length=getattr(agent, "_config_context_length", None),
+                                provider=agent.provider,
+                                custom_providers=getattr(agent, "_custom_providers", None),
+                            )
+                        except Exception:
+                            resolved_context_length = None
+
+                        if isinstance(resolved_context_length, int) and resolved_context_length > 0:
+                            agent._resolved_context_length = resolved_context_length
+                            cc = getattr(agent, "context_compressor", None)
+                            if cc is not None:
+                                cc.update_model(
+                                    model=resolved_model,
+                                    context_length=resolved_context_length,
+                                    base_url=agent.base_url,
+                                    api_key=getattr(agent, "api_key", ""),
+                                    provider=agent.provider,
+                                    api_mode=agent.api_mode,
+                                )
+
                     agent.session_prompt_tokens += prompt_tokens
                     agent.session_completion_tokens += completion_tokens
                     agent.session_total_tokens += total_tokens

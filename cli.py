@@ -3675,22 +3675,38 @@ class HermesCLI:
         return f"{emoji} {time_str}"
 
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
-        # Prefer the agent's model name — it updates on fallback.
-        # self.model reflects the originally configured model and never
-        # changes mid-session, so the TUI would show a stale name after
-        # _try_activate_fallback() switches provider/model.
+        # Prefer the agent's runtime-resolved model name (set after first API call).
+        # Falls back to agent.model (mid-session) then self.model (configured).
         agent = getattr(self, "agent", None)
-        model_name = (getattr(agent, "model", None) or self.model or "unknown")
+        model_name = getattr(agent, "_resolved_model", None)
+        if not model_name:
+            model_name = getattr(agent, "_resolved_context_model", None)
+        if not model_name:
+            model_name = getattr(agent, "model", None) or self.model or "unknown"
         model_short = model_name.split("/")[-1] if "/" in model_name else model_name
         if model_short.endswith(".gguf"):
             model_short = model_short[:-5]
         if len(model_short) > 26:
             model_short = f"{model_short[:23]}..."
 
+        provider_name = ""
+        if agent:
+            provider_getter = getattr(agent, "get_display_provider_name", None)
+            if callable(provider_getter):
+                provider_name = provider_getter() or ""
+            if not provider_name:
+                provider_name = getattr(agent, "_resolved_provider", None) or getattr(agent, "provider", None) or ""
+        if not provider_name:
+            provider_name = getattr(self, "provider", None) or getattr(self, "requested_provider", None) or ""
+        provider_name = str(provider_name).strip()
+        provider_short = provider_name.split("/")[-1] if provider_name else ""
+
         elapsed_seconds = max(0.0, (datetime.now() - self.session_start).total_seconds())
         snapshot = {
             "model_name": model_name,
             "model_short": model_short,
+            "provider_name": provider_name,
+            "provider_short": provider_short,
             "duration": format_duration_compact(elapsed_seconds),
             "prompt_elapsed": self._format_prompt_elapsed(
                 getattr(self, "_prompt_start_time", None),
@@ -3754,7 +3770,15 @@ class HermesCLI:
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
             if context_tokens < 0:
                 context_tokens = 0
-            context_length = getattr(compressor, "context_length", 0) or 0
+            resolved_context_length = getattr(agent, "_resolved_context_length", None)
+            if resolved_context_length is not None:
+                context_length = resolved_context_length or 0
+            else:
+                context_getter = getattr(agent, "get_display_context_length", None)
+                if callable(context_getter):
+                    context_length = context_getter() or 0
+                else:
+                    context_length = getattr(compressor, "context_length", 0) or 0
             if context_length < 0:
                 context_length = 0
             snapshot["context_tokens"] = context_tokens
@@ -3967,12 +3991,20 @@ class HermesCLI:
 
             yolo_active = self._is_session_yolo_active()
             if width < 52:
-                text = f"⚕ {snapshot['model_short']} · {duration_label}"
+                provider_label = snapshot.get("provider_short") or ""
+                text = f"⚕ {snapshot['model_short']}"
+                if provider_label:
+                    text += f" · {provider_label}"
+                text += f" · {duration_label}"
                 if yolo_active:
                     text += " · ⚠ YOLO"
                 return self._trim_status_bar_text(text, width)
             if width < 76:
-                parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                provider_label = snapshot.get("provider_short") or ""
+                parts = [f"⚕ {snapshot['model_short']}"]
+                if provider_label:
+                    parts.append(provider_label)
+                parts.append(percent_label)
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
                     parts.append(f"🗜️ {compressions}")
@@ -3995,7 +4027,11 @@ class HermesCLI:
                 context_label = "ctx --"
 
             compressions = snapshot.get("compressions", 0)
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            provider_label = snapshot.get("provider_short") or ""
+            parts = [f"⚕ {snapshot['model_short']}"]
+            if provider_label:
+                parts.append(provider_label)
+            parts.extend([context_label, percent_label])
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             bg_count = snapshot.get("active_background_tasks", 0)
@@ -4026,6 +4062,8 @@ class HermesCLI:
             # line and produce duplicated status bar rows over long sessions.
             width = self._get_tui_terminal_width()
             duration_label = snapshot["duration"]
+            provider_label = snapshot.get("provider_short") or ""
+            provider_fragments = [("class:status-bar-dim", " · "), ("class:status-bar-dim", provider_label)] if provider_label else []
             yolo_active = self._is_session_yolo_active()
 
             if width < 52:
@@ -4049,6 +4087,7 @@ class HermesCLI:
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                    ] + provider_fragments + [
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
                     ]
@@ -4084,6 +4123,7 @@ class HermesCLI:
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                    ] + provider_fragments + [
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
                         ("class:status-bar-dim", " │ "),

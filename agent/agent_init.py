@@ -323,6 +323,8 @@ def init_agent(
     else:
         agent.api_mode = "chat_completions"
 
+    agent._resolved_provider = agent.provider
+
     # Eagerly warm the transport cache so import errors surface at init,
     # not mid-conversation.  Also validates the api_mode is registered.
     try:
