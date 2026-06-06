@@ -28,6 +28,21 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 
 ---
 
+## Featured Patch: Hermes Status Bar Runtime Context
+
+The status bar now shows **runtime-resolved** model, provider, and context usage — not just configured values.
+
+**Before:** `⚕ hermes │ 19K/256K │ 45%` (configured alias, stale context)
+**After:** `⚕ gpt-4o-mini │ openrouter │ 19K/128K │ 15%` (what the API actually returned)
+
+Useful with OpenRouter, fallback chains, model aliases, and multi-provider setups.
+
+- **Quick apply:** `cd patches/hermes-statusbar-runtime-context && ./preflight.sh && ./apply.sh`
+- **Documentation:** [docs/hermes-statusbar-runtime-context.md](docs/hermes-statusbar-runtime-context.md)
+- **Patch README:** [patches/hermes-statusbar-runtime-context/README.md](patches/hermes-statusbar-runtime-context/README.md)
+
+---
+
 ## Quick Install
 
 ### Linux, macOS, WSL2, Termux
