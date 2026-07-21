@@ -2184,6 +2184,31 @@ def run_conversation(
                             "error": "First response truncated due to output length limit"
                         }
                 
+                # Track resolved model/provider/context_length from API response
+                # for status bar. Without this, a preset (@preset/hermes) reports
+                # its own configured window while the actual responding model
+                # (e.g. longcat-2.0 at 1M) is never reflected in the TUI.
+                if hasattr(response, 'model') and response.model:
+                    _new_resolved = response.model
+                    _prev_resolved = getattr(agent, '_resolved_model', None)
+                    agent._resolved_model = _new_resolved
+                    if not getattr(agent, '_resolved_provider', None):
+                        agent._resolved_provider = agent.provider
+                    # Resolve context_length when the model changes — the
+                    # compressor still holds the preset's configured window.
+                    if _new_resolved != _prev_resolved and not getattr(agent, '_resolved_context_length', None):
+                        try:
+                            from agent.model_metadata import get_model_context_length
+                            _rcl = get_model_context_length(
+                                _new_resolved,
+                                base_url=agent.base_url,
+                                provider=agent.provider,
+                            )
+                            if _rcl and _rcl > 0:
+                                agent._resolved_context_length = _rcl
+                        except Exception:
+                            pass
+
                 # Track actual token usage from response for context management
                 if hasattr(response, 'usage') and response.usage:
                     canonical_usage = normalize_usage(

@@ -4625,7 +4625,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # changes mid-session, so the TUI would show a stale name after
         # _try_activate_fallback() switches provider/model.
         agent = getattr(self, "agent", None)
-        model_name = (getattr(agent, "model", None) or self.model or "unknown")
+        # Use resolved model from API response when available — this is the
+        # actual model answering (e.g. longcat-2.0), not the preset (@preset/hermes).
+        _resolved_model = getattr(agent, "_resolved_model", None) if agent else None
+        model_name = (_resolved_model or getattr(agent, "model", None) or self.model or "unknown")
         # Friendly display: prefer reverse-alias from config.yaml ``model_aliases:``
         # before slash/length truncation. This turns long Palantir RIDs like
         # ``ri.language-model-service..language-model.anthropic-claude-4-7-opus``
@@ -4727,6 +4730,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             context_length = getattr(compressor, "context_length", 0) or 0
             if context_length < 0:
                 context_length = 0
+            # Use resolved context_length from API response — this is the
+            # actual model window (e.g. 1M), not the preset (e.g. 256K).
+            _resolved_ctx = getattr(agent, "_resolved_context_length", None) if agent else None
+            if _resolved_ctx and _resolved_ctx > 0:
+                context_length = _resolved_ctx
             snapshot["context_tokens"] = context_tokens
             snapshot["context_length"] = context_length or None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
