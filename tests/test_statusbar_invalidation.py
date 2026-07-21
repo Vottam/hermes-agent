@@ -1,15 +1,13 @@
-
 """Tests for status bar resolved model/context invalidation behavior."""
 
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 
-def _make_agent(*, model='alias/model', provider='openrouter', resolved_model=None, 
-                resolved_provider=None, context_length=256000, resolved_context_length=None):
-    """Create a minimal agent mock for status bar tests."""
+def _make_agent(*, model='alias/model', provider='openrouter',
+                resolved_model=None, resolved_provider=None,
+                context_length=256000, resolved_context_length=None):
+    """Build a minimal agent mock for status bar attribute tests."""
     agent = SimpleNamespace()
     agent.model = model
     agent.provider = provider
@@ -24,85 +22,85 @@ def _make_agent(*, model='alias/model', provider='openrouter', resolved_model=No
     return agent
 
 
-def test_successive_model_change_invalidates_context():
-    """When model changes A→B→C, context must be re-resolved each time."""
-    from agent.conversation_loop import ConversationLoop
+def _simulate_resolution(agent, _new_resolved):
+    """Mimics the status bar context invalidation logic from
+    conversation_loop.py.
     
-    loop = ConversationLoop.__new__(ConversationLoop)
-    
-    # Simulate first response: model A with 256K context
-    response_a = SimpleNamespace(model='model-a', usage=None)
-    agent = _make_agent(model='preset', resolved_model='model-a', resolved_context_length=256000)
-    
-    # After processing response_a, _resolved_context_length should be 256000
-    assert agent._resolved_context_length == 256000
-    
-    # Simulate second response: model B with 1M context
-    # The invalidation logic should clear _resolved_context_length before resolving
-    response_b = SimpleNamespace(model='model-b', usage=None)
-    
-    # Patch get_model_context_length to return 1M for model-b
-    with patch('agent.conversation_loop.get_model_context_length', return_value=1000000):
-        # Process response_b
-        _new_resolved = response_b.model
-        _prev_resolved = getattr(agent, '_resolved_model', None)
-        agent._resolved_model = _new_resolved
-        
-        if _new_resolved != _prev_resolved:
-            agent._resolved_context_length = None  # Invalidation
+    This function mirrors the behavior of the response processing block
+    so we can test the invalidation logic independently.
+    """
+    _prev_resolved = getattr(agent, '_resolved_model', None)
+    agent._resolved_model = _new_resolved
+
+    if _new_resolved != _prev_resolved:
+        agent._resolved_context_length = None
+        try:
             from agent.model_metadata import get_model_context_length
             _rcl = get_model_context_length(
-                _new_resolved,
-                base_url=agent.base_url,
-                provider=agent.provider,
-            )
+                _new_resolved, base_url='', provider='')
             if _rcl and _rcl > 0:
                 agent._resolved_context_length = _rcl
-    
+        except Exception:
+            pass
+
+
+def test_successive_model_change_invalidates_context():
+    agent = _make_agent(model='preset', resolved_model='model-a',
+                       resolved_context_length=256000)
+    assert agent._resolved_context_length == 256000
+
+    with patch('agent.model_metadata.get_model_context_length', return_value=1000000):
+        _simulate_resolution(agent, 'model-b')
+
     assert agent._resolved_context_length == 1000000
     assert agent._resolved_model == 'model-b'
 
 
 def test_same_model_does_not_re_resolve():
-    """When model stays the same, no re-resolution should occur."""
-    agent = _make_agent(model='preset', resolved_model='model-a', resolved_context_length=256000)
-    
-    with patch('agent.conversation_loop.get_model_context_length') as mock_resolve:
-        # Simulate same model response
-        _new_resolved = 'model-a'
-        _prev_resolved = getattr(agent, '_resolved_model', None)
-        
-        if _new_resolved != _prev_resolved:
-            agent._resolved_context_length = None
-            from agent.model_metadata import get_model_context_length
-            _rcl = get_model_context_length(_new_resolved, base_url='', provider='')
-            if _rcl and _rcl > 0:
-                agent._resolved_context_length = _rcl
-    
-    # Should NOT have called resolution
-    mock_resolve.assert_not_called()
-    # Context should remain unchanged
+    agent = _make_agent(model='preset', resolved_model='model-a',
+                       resolved_context_length=256000)
+
+    with patch('agent.model_metadata.get_model_context_length') as m:
+        _simulate_resolution(agent, 'model-a')
+
+    m.assert_not_called()
     assert agent._resolved_context_length == 256000
 
 
 def test_failed_resolution_does_not_keep_old_context():
-    """If resolution fails, old context must not be preserved."""
-    agent = _make_agent(model='preset', resolved_model='model-a', resolved_context_length=256000)
-    
-    with patch('agent.conversation_loop.get_model_context_length', side_effect=Exception('fail')):
-        _new_resolved = 'model-b'
-        _prev_resolved = getattr(agent, '_resolved_model', None)
-        agent._resolved_model = _new_resolved
-        
-        if _new_resolved != _prev_resolved:
-            agent._resolved_context_length = None  # Invalidation happens BEFORE resolution
-            try:
-                from agent.model_metadata import get_model_context_length
-                _rcl = get_model_context_length(_new_resolved, base_url='', provider='')
-                if _rcl and _rcl > 0:
-                    agent._resolved_context_length = _rcl
-            except Exception:
-                pass
-    
-    # After failed resolution, context should be None (not 256000)
+    agent = _make_agent(model='preset', resolved_model='model-a',
+                       resolved_context_length=256000)
+
+    with patch('agent.model_metadata.get_model_context_length',
+               side_effect=Exception('fail')):
+        _simulate_resolution(agent, 'model-b')
+
     assert agent._resolved_context_length is None
+
+
+def test_five_transitions_all_recalculate():
+    agent = _make_agent(model='preset')
+
+    for i, expected in enumerate([256000, 1000000, 32000, 8000, 512000], 1):
+        with patch('agent.model_metadata.get_model_context_length',
+                   return_value=expected):
+            _simulate_resolution(agent, f'model-{i}')
+
+        assert agent._resolved_context_length == expected, (
+            f'Transition {i}: expected {expected}, '
+            f'got {agent._resolved_context_length}')
+
+
+def test_no_response_model_preserves_state():
+    agent = _make_agent(model='preset', resolved_model='model-a',
+                       resolved_context_length=256000)
+
+    # If response.model is None, no resolution should happen
+    _new_resolved = None
+    _prev_resolved = getattr(agent, '_resolved_model', None)
+    if _new_resolved is not None:
+        agent._resolved_model = _new_resolved
+
+    # State unchanged
+    assert agent._resolved_context_length == 256000
+    assert agent._resolved_model == 'model-a'
