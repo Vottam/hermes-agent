@@ -2196,7 +2196,11 @@ def run_conversation(
                         agent._resolved_provider = agent.provider
                     # Resolve context_length when the model changes — the
                     # compressor still holds the preset's configured window.
-                    if _new_resolved != _prev_resolved and not getattr(agent, '_resolved_context_length', None):
+                    # Always invalidate and re-resolve: a previous stale
+                    # value from another model would otherwise stick until
+                    # the end of the session.
+                    if _new_resolved != _prev_resolved:
+                        agent._resolved_context_length = None
                         try:
                             from agent.model_metadata import get_model_context_length
                             _rcl = get_model_context_length(
