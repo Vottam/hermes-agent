@@ -194,9 +194,16 @@ def _modules_importable(python: str, modules: Iterable[str]) -> tuple[list[str],
         "        out[m] = type(exc).__name__\n"
         "print(json.dumps(out))\n"
     )
+    probe_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    gate_pythonpath = os.environ.get("HERMES_GATE_PYTHONPATH", "").strip()
+    if gate_pythonpath:
+        probe_env["PYTHONPATH"] = gate_pythonpath
     try:
         res = subprocess.run(
-            [python, "-I", "-c", code], capture_output=True, text=True, timeout=60, check=False,
+            [python, "-S", "-c", code],
+            cwd="/",
+            env=probe_env,
+            capture_output=True, text=True, timeout=60, check=False,
         )
     except Exception as exc:  # noqa: BLE001
         raise GateRuntimeError(f"GATE_RUNTIME_PROBE_FAILED={python}:{type(exc).__name__}") from exc

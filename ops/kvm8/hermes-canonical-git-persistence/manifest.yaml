@@ -34,6 +34,10 @@ updater:
   timer: disabled_by_policy_until_owner_authorizes
   force_push: prohibited
   destructive_pull_or_reset: prohibited
+  operational_control_plane_commits:
+    - 512f9d4d39fca450e7cacb3239c98dcfa8ba7205
+    - 4794dc46ede18bf74505cf4cd92a697ddfdc5e45
+  gate_dependency_probe: python_3.14.7_S_plus_explicit_HERMES_GATE_PYTHONPATH
 external_configuration:
   private_backup: restricted_kvm8_audit_backup
   public_backup: prohibited
