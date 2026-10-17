@@ -1,0 +1,14 @@
+[Unit]
+Description=Hermes KVM8 safe Git updater (explicit gate)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/hermes-kvm8/hermes-update-git.env
+ExecStart=/usr/local/bin/hermes-update-git.sh --check
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+# Promotion is never implicit. An authorized operator may run --apply
+# separately after reviewing the audit and branch gates.

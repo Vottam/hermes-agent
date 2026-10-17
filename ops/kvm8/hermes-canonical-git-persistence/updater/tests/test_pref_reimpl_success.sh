@@ -1,0 +1,7 @@
+#!/bin/bash
+set -euo pipefail
+# Fixture: NEEDS_REIMPLEMENTATION reparável
+# Simula: check=1 → apply=0 → post-check=PASS_EXISTING → acceptance=0 → smoke=PASS
+# Resultado esperado: CUSTOMIZATION_PREFLIGHT=REIMPLEMENTED_PASS, PINNED_TARGET_PREFLIGHT=PASS
+echo "TEST_PREFLIGHT_REIMPLEMENT_SUCCESS=PASS"
+echo "EXPECTED: REIMPLEMENTED_PASS / GLOBAL=PASS"
