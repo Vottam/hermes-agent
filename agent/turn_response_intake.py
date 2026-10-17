@@ -145,6 +145,11 @@ def normalize_model_response(
         api_call_count=api_call_count, api_duration=api_duration, api_start_time=api_start_time,
         api_request_id=api_request_id, effective_task_id=effective_task_id, turn_id=turn_id,
     )
+    # Capture the real model served by the provider (OpenRouter exposes it in response.model).
+    # This feeds the status bar customization that shows the actual deployment, not the alias.
+    real_model_from_response = getattr(response, "model", None)
+    if real_model_from_response:
+        agent._last_actual_response_model = str(real_model_from_response).strip()
     from hermes_cli.observability.shared_metrics_harness import record_reply_content
     record_reply_content(agent, response, assistant_message)
 
