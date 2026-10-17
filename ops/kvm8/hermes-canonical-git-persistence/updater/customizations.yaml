@@ -1,0 +1,427 @@
+id: statusbar-resolved-model
+description: Status bar shows real model (response.model -> footer)
+priority: HIGH
+historical_refs:
+  - "commit d1c863a341 (statusbar-resolved-model)"
+  - "<CANONICAL_REPO>/agent/cli_status_bar_mixin.py"
+reconciler: customizations/statusbar-resolved-model/reconcile.py
+acceptance: customizations/statusbar-resolved-model/acceptance.py
+
+---
+id: CUSTOM_02
+description: Memory policy semantic gate (routing, compaction rules)
+priority: HIGH
+historical_refs:
+  - "commit c49e44eaf1 (memory-policy-semantic-gate)"
+reconciler: customizations/CUSTOM_02/reconcile.py
+acceptance: customizations/CUSTOM_02/acceptance.py
+
+---
+id: CUSTOM_03
+description: Hindsight client support line 0.10.x with fail-closed dependency and lock reconciliation
+priority: HIGH
+historical_refs:
+  - "informational only: commit b61994ca8a (hindsight-client-floor-and-guard)"
+desired_state:
+  server_line: "0.10.x"
+  client_constraint: ">=0.10.0,<0.11.0"
+  minimum_client_version: "0.10.0"
+  maximum_client_version_exclusive: "0.11.0"
+  lock_package: hindsight-client
+  files:
+    - pyproject.toml
+    - uv.lock
+    - plugins/memory/hindsight/README.md
+    - plugins/memory/hindsight/__init__.py
+    - plugins/memory/hindsight/plugin.yaml
+    - plugins/memory/hindsight/settings.py
+    - plugins/memory/hindsight/setup.py
+    - tools/lazy_deps.py
+  required_tests:
+    - custom03/test_reconcile.py
+    - custom03/acceptance.py
+reconciler: customizations/CUSTOM_03/reconcile.py
+acceptance: customizations/CUSTOM_03/acceptance.py
+tests: customizations/CUSTOM_03/test_reconcile.py
+
+---
+id: CUSTOM_04
+description: Sessions auto-prune scheduler (cron/scheduler)
+priority: MEDIUM
+historical_refs:
+  - "commit 681eea9850 (sessions-auto-prune-scheduler)"
+reconciler: customizations/CUSTOM_04/reconcile.py
+acceptance: customizations/CUSTOM_04/acceptance.py
+
+---
+id: CUSTOM_05
+description: OpenRouter preset disabled fallback (error_classifier)
+priority: MEDIUM
+historical_refs:
+  - "commit a8895ad860 (openrouter-preset-disabled-fallback)"
+reconciler: customizations/CUSTOM_05/reconcile.py
+acceptance: customizations/CUSTOM_05/acceptance.py
+
+---
+id: CUSTOM_06
+description: Update control plane external (this migration)
+priority: HIGH
+historical_refs:
+  - "commit 82fab9f244 (kvm8-update-control-plane)"
+  - "legacy updater: /usr/local/sbin/hermes-update-git.sh"
+reconciler: customizations/CUSTOM_06/reconcile.py
+acceptance: customizations/CUSTOM_06/acceptance.py
+
+---
+id: CUSTOM_07
+description: Scoped WP-CLI child environment isolation after shell snapshot
+priority: HIGH
+historical_refs:
+  - "informational only: commits 111c9d33 and 920889a1"
+  - "semantic desired-state; no historical replay"
+desired_state:
+  scope: WPCLI_ONLY
+  original_command_classification: required
+  post_snapshot_ld_library_path_removal: required
+  parent_environment_preserved: required
+  non_wpcli_environment_preserved: required
+  fail_closed_on_unknown_upstream: true
+reconciler: customizations/CUSTOM_07/reconcile.py
+acceptance: customizations/CUSTOM_07/acceptance.py
+tests: customizations/CUSTOM_07/test_reconcile.py
+
+---
+id: CUSTOM_08
+description: PM lifecycle normalized for every Hermes profile wrapper in /root/.local/bin
+priority: HIGH
+historical_refs:
+  - "informational only: hermes_cli/_launchers.py::_publish_conveniences (republishes {hermes,hermes-agent,hermes-acp} and adopts any wrapper mentioning .hermes/bin/hermes via _owns_launcher)"
+  - "informational only: hermes_cli/profiles.py::create_wrapper_script (upstream writes `exec hermes -p <profile>`, the GENERIC_PM class)"
+  - "semantic desired-state; no historical replay"
+desired_state:
+  scope: PROFILE_LAUNCHERS
+  wrapper_dir: /root/.local/bin
+  pm_launcher: "${HERMES_CANONICAL_REPO}/.hermes/bin/hermes"
+  exec_target_must_be_pm_launcher: required
+  legacy_venv_exec_prohibited: required
+  local_dot_venv_exec_prohibited: required
+  profile_home_export_required: required
+  profile_home_isolation_required: required
+  generic_root_hermes_home_prohibited: required
+  minus_p_literal_profile_name: required
+  runtime_python_must_not_be_legacy_3_11: required
+  rollback_artifacts_excluded: "*.pre-pm-<UTC>"
+  fail_closed_on_unknown_upstream: true
+reconciler: customizations/CUSTOM_08/reconcile.py
+acceptance: customizations/CUSTOM_08/acceptance.py
+tests: customizations/CUSTOM_08/test_reconcile.py
+
+---
+id: CUSTOM_11
+description: Hindsight initialization must be non-mutating; no implicit auto-upgrade from initialize()
+priority: HIGH
+historical_refs:
+  - "informational only: hindsight-integrations/hermes/__init__.py::HindsightMemoryProvider.initialize -> _maybe_upgrade_client() -> tools.lazy_deps.install_specs() -> hermes_cli._old_updater.stop_for_relaunch()"
+  - "incident 2026-09-27: PM takeover receipt, ffmpeg promoted ~490 MB, tools/facts.json packages.ffmpeg written, pre_update.sha == post_update.sha"
+  - "semantic desired-state; no historical replay"
+source:
+  upstream_repo: https://github.com/vectorize-io/hindsight
+  upstream_base_commit: "176f8c2"
+  fork_repo: /opt/hindsight-kvm8/source/hindsight-upstream
+  strategy: canonical_versioned_fork_converge_to_upstream
+  site_packages_edited_directly: false
+desired_state:
+  scope: HINDSIGHT_PLUGIN_INIT
+  auto_upgrade_removed_from_initialize: required
+  initialize_semantics: check_only
+  mutation_call_sites_allowed_only_in: upgrade_client_explicitly
+  package_manager_invoked_on_init: prohibited
+  stop_for_relaunch_invoked_on_init: prohibited
+  tool_extraction_on_init: prohibited
+  dependency_installation_on_init: prohibited
+  fail_closed_on_incompatible: true
+  auto_install_on_mismatch: prohibited
+  explicit_upgrade_path_preserved: required
+  plugin_version_min: "0.10.1"
+  local_version_min: "0.10.0"
+  local_version_max_exclusive: "0.11.0"
+  effective_version_range: ">=0.10.1,<0.11.0"
+  profile_discovery: dynamic_via_DEEP_RUNTIME_GATES_profile_gate
+  exclude_if_hindsight_required_false: hermes-migration-maint
+  libatomic_installed: false
+  libatomic_preflight_required_for_explicit_path: true
+  fail_closed_on_unknown_upstream: true
+reconciler: customizations/CUSTOM_11/reconcile.py
+acceptance: customizations/CUSTOM_11/acceptance.py
+tests: customizations/CUSTOM_11/libatomic_preflight.py
+
+---
+id: CUSTOM_12
+description: Retain LLM stage must report queue wait, provider wall and total stage as independent measurements
+priority: HIGH
+historical_refs:
+  - "informational only: llm_wrapper.py ConfiguredLLMProvider.call stamps call_start BEFORE _acquire_permits, so llm_requests.duration_ms sums semaphore wait and provider time"
+  - "incident: retain stage total ~319.9s of which queue wait ~313s and actual provider call ~5.5s; the wait read as provider latency"
+  - "after Tier 1: queue_wait=0.012s, provider=18.210s, total=19.469s"
+  - "reflect bound set_queue_wait_sink since #3881; retain never bound one, so its wait was measured then discarded"
+source:
+  upstream_repo: https://github.com/vectorize-io/hindsight
+  upstream_base_commit: "f8950b0c"
+  upstream_base_ref: "v0.10.1"
+  fork_repo: /opt/hindsight-kvm8/source/hindsight-upstream
+  fork_branch: kvm8-t2-2-retain-queue-telemetry
+  fork_commits: ["0241b64fa707f36536beb2464a09c1ff48624e8d", "a4397db59d2a7eb5a859644a20eb6bb8816ffcca"]
+  base_is_byte_identical_to_installed_release: true
+  strategy: canonical_versioned_fork_converge_to_upstream
+  site_packages_edited_directly: false
+  ad_hoc_overlay_used: false
+desired_state:
+  scope: HINDSIGHT_RETAIN_LLM_STAGE
+  schema: hindsight.retain.llm_stage.v1
+  queue_wait_seconds: independent_timestamp_pair_global_semaphore
+  provider_wall_seconds: independent_timestamp_pair_provider_dispatch
+  total_llm_stage_seconds: independent_timestamp_pair_stage_bounds
+  provider_wall_derived_from_total_minus_queue: prohibited
+  queue_wait_reuses_existing_helper: true
+  queue_wait_helper: hindsight_api.engine.llm_trace.record_queue_wait
+  second_telemetry_mechanism_invented: false
+  labels_low_cardinality: [operation, stage, provider, model, result, attempts, http_status, error_type]
+  high_cardinality_labels_prohibited: [operation_id, session_id, bank_id, trace_id, uuid, prompt, content, error_text]
+  http_status_from: structured_exception_attribute
+  substring_grep_for_429: prohibited
+  log_emission_default: on
+  log_opt_out_env: HINDSIGHT_RETAIN_LLM_STAGE_LOG
+  telemetry_sink_failure: fail_open
+  behavioral_scheduling_change: prohibited
+  unchanged: [LLM_MAX_CONCURRENT, RETAIN_WALL_TIMEOUT, RETAIN_LLM_TIMEOUT, LLM_TIMEOUT, provider_order, retry_count, semaphore_acquisition_order, worker_concurrency]
+  t2_3_deadline_or_t2_4_fallback_budget_included: false
+  legacy_duration_semantics: unchanged_composite_queue_plus_provider
+  legacy_duration_renamed_to_provider_latency: false
+verification:
+  unit_suite: hindsight-api-slim/tests/test_t2_2_retain_llm_stage_telemetry.py
+  unit_test_count: 24
+  gate_proves_semantics_with_fixtures: true
+  gate_rejects_baseline_without_api: true
+  gate_rejects_derived_provider_wall: true
+  acceptance_interpreter: /root/.hermes/tools/python-3.14.7+20260901-linux-x64/bin/python
+  fixture_interpreter: /opt/hindsight-kvm8/current/venv/bin/python
+  pyyaml_ambiguity_reintroduced: false
+acceptance: customizations/CUSTOM_12/acceptance.py
+
+---
+id: CUSTOM_13
+description: Canonical Hindsight fork release path + updater source mode (hash-verified, fail-closed, timer-durable)
+priority: HIGH
+task: KVM8_HINDSIGHT_T2_5_CANONICAL_FORK_RELEASE_AND_UPDATER_SOURCE
+historical_refs:
+  - "task T2.2 (CUSTOM_12) was BLOCKED_DEPLOYMENT_PATH: code passed, deployment path did not exist"
+  - "pre-T2.5 updater sha256 4a73c5495486090e253a47aed3d6541ec33940e414ef97bcdcb4ef181bdc5541"
+  - "backup /root/hermes-audits/kvm8-hindsight-t2-5-fork-release-updater-20260928T002936Z/backups/"
+desired_state:
+  scope: HINDSIGHT_SERVER_PACKAGE_SOURCE
+  schema: mastertrend.hindsight-fork-release/v1
+  official_base_version: "0.10.1"
+  fork_package_version: "0.10.1+mastertrend.t22.1"
+  fork_source_commit: "a4397db59d2a7eb5a859644a20eb6bb8816ffcca"
+  fork_branch: kvm8-t2-2-retain-queue-telemetry
+  fork_base_commit: "f8950b0c07d9e34c76493dba802bb309f0ce60fd"
+  patch_series:
+    - "0241b64fa707f36536beb2464a09c1ff48624e8d"
+    - "a4397db59d2a7eb5a859644a20eb6bb8816ffcca"
+  canonical_wheel_repository: /opt/hindsight-kvm8/packages/releases
+  wheel_filename: hindsight_api_slim-0.10.1+mastertrend.t22.1-py3-none-any.whl
+  wheel_sha256: bfb9b92da5b49d555e0d6030302705170ea57784f530115508949b5ad0f330bb
+  source_date_epoch: 1790553297
+  canonical_version_authority: installed_package_metadata
+  source_modes:
+    OFFICIAL_UPSTREAM: pypi
+    MASTER_TREND_FORK: local_canonical_artifact_hash_verified
+  source_mode_inferred_from_files: prohibited
+  main_package_source: LOCAL_CANONICAL
+  dependency_source: pypi_trusted_existing
+  main_package_addressed_by: absolute_wheel_path
+  silent_pypi_fallback: prohibited
+  auto_converge_to_upstream: no
+  rollback_is_implicit_fallback: prohibited
+  artifact_from_audit_dir: prohibited
+  site_packages_edit: prohibited
+  epemeral_overlay: prohibited
+  masquerade_as_official: prohibited
+  policy_range: ">=0.10.0,<0.11.0"
+  local_version_bypasses_ceiling: false
+  fork_version_normalized_to_base: prohibited
+  fork_identity_check: exact_string_equality
+  timer_source_mode_dropin: /etc/systemd/system/hindsight-update-safe.service.d/10-t2-5-fork-source-mode.conf
+  t2_features:
+    T2_1_NON_MUTATING_INIT: inherited_from_base
+    T2_2_QUEUE_TELEMETRY: yes
+    T2_3_MEMBER_DEADLINE: no
+    T2_4_FALLBACK_BUDGET: no
+  unchanged:
+    - HINDSIGHT_VERSION_POLICY_MIN
+    - HINDSIGHT_VERSION_POLICY_MAX_EXCLUSIVE
+    - release_geometry
+    - staging_and_promotion_flow
+    - shared_update_lock
+    - LLM_MAX_CONCURRENT
+    - RETAIN_LLM_MAX_CONCURRENT
+    - CONSOLIDATION_LLM_MAX_CONCURRENT
+    - RETAIN_WALL_TIMEOUT
+    - RETAIN_LLM_TIMEOUT
+    - provider_model_auth_fallback
+verification:
+  provenance_gate_tests: 6
+  provenance_gate_fail_closed: "missing wheel, wrong hash, mutated wheel, corrupt manifest, wrong version, unknown mode"
+  policy_guard_tests: 9
+  t2_2_unit_suite: hindsight-api-slim/tests/test_t2_2_retain_llm_stage_telemetry.py
+  t2_2_unit_test_count: 24
+  gate_rejects_corrupted_wheel: true
+acceptance: customizations/CUSTOM_13/acceptance.py
+
+---
+id: CUSTOM_14
+title: Deterministic fail-closed Hindsight staging environment
+tier: T2.5
+task: KVM8_HINDSIGHT_T2_5_STAGING_HARNESS_ENV_REPAIR
+status: applied
+owner: hermes-kvm8
+applied_at_utc: "2026-09-28"
+target_host_file: /usr/local/bin/hindsight-update-safe.sh
+policy: EXPLICIT_WHITELIST_FAIL_CLOSED
+problem: |
+  The staging block exported 4 HINDSIGHT_API_* vars and scraped
+  HINDSIGHT_API_LLM_API_KEY via grep|cut, while /etc/hindsight-kvm8/daemon.env
+  carries 16 HINDSIGHT_API_LLM* keys. The 15 missing keys let hindsight_api
+  config.py select its hardcoded DEFAULT_LLM_PROVIDER=openai /
+  DEFAULT_LLM_MODEL=gpt-4o-mini, shipping the OpenRouter key to
+  api.openai.com -> HTTP 401 -> retain fact extraction failed.
+  The harness was also non-deterministic: the systemd unit has
+  EnvironmentFile=-/etc/hindsight-kvm8/daemon.env, so under the timer the
+  staging inherited all 16 keys by accident while an interactive shell did not.
+desired_state: |
+  - single canonical source, the daemon EnvironmentFile
+  - parsed as a systemd-style env file, never sourced
+  - explicit whitelist; DATABASE_URL, PORT, LOG_LEVEL always staging-owned
+  - 8 required core LLM keys; missing or empty fails BEFORE launch
+  - launch via env -i with an explicit key list; nothing inherited
+  - values never logged; presence and counts only
+invariants: |
+  - PROVIDER_CALLS=0 when a required key is missing
+  - no implicit openai/gpt-4o-mini fallback is reachable
+  - identical result under normal root, minimal timer, and hostile vars
+gate_not_weakened: |
+  REAL_LLM_REQUIRED_FOR_STAGING=yes. Staging still requires a real LLM for
+  retain fact extraction, sentinel recall and non-empty reflect.
+reconciler: customizations/CUSTOM_14/reconcile.py
+acceptance: customizations/CUSTOM_14/test_staging_env.py
+tests:
+  fail_closed_missing_required_key: 8
+  fail_closed_empty_value: 1
+  fail_closed_unreadable_source: 1
+  environment_independence_scenarios: 2
+  ab_equivalence: 1
+  acceptance_total: 17
+evidence: /root/hermes-audits/kvm8-hindsight-t2-5-staging-harness-env-20260928T032809Z
+
+---
+
+id: CUSTOM_15
+title: Hindsight updater lifecycle repair (relocation gate, explicit rollback, terminal state)
+tier: T2.5
+task: KVM8_HINDSIGHT_T2_5_UPDATER_POST_PROMOTION_GATE_AND_ROLLBACK_REPAIR
+status: applied
+owner: hermes-kvm8
+applied_at_utc: "2026-09-28"
+target_host_file: /usr/local/bin/hindsight-update-safe.sh
+problem: |
+  Three lifecycle defects made a SUCCESSFUL fork promotion report failure.
+  (A) validate_release_identity scanned the whole venv for the literal token
+  "candidate-". Measured on the certified production release it matched 6
+  legitimate files including hindsight_api/engine/memories/pg/graph.py, and the
+  official prod-0.10.1 environment triggers the same false positive, so the
+  gate was unsatisfiable by construction: no valid release could pass it. The
+  promotion therefore exited 1 after a correct swap, exit code 1, leaving
+  update-state.json permanently IN_PROGRESS.
+  (B) --rollback-to-official could not revert 0.10.1+mastertrend.t22.1 ->
+  0.10.1 because the anti-regression guard correctly reports
+  0.10.1 < 0.10.1+mastertrend.t22.1 in PEP 440. The guard was RIGHT for updates;
+  the missing thing was operation semantics, not a weaker guard.
+  (C) update-state.json was rewritten only on the success path, so any exit
+  after the symlink swap left IN_PROGRESS forever.
+fix: |
+  The shell now DELEGATES; it no longer reimplements any of this.
+    relocation_gate.py  semantic relocation validation (8 path facts)
+    lifecycle.py        admission of explicit rollback + terminal run state
+  Each decision has one implementation, unit-tested against fixtures, and
+  invoked identically by the shell, the timer and the acceptance suite.
+relocation_gate: |
+  REPLACED: grep -R --fixed-strings "candidate-" <release>/venv
+  A relocation is a PATH fact, not a token fact. Checks: VENV_PRESENT,
+  PREFIX_CHECK, EXECUTABLE_CHECK, SHEBANG_CHECK, LAUNCHER_PREFIX,
+  CONSOLE_SCRIPT, STAGING_REF, PYVENV_CFG, RUNTIME_PATHS. site-packages is
+  never lexically scanned. The lexical scan survives only in scoped form, over
+  files that can carry a PATH VALUE, for the concrete staging path.
+relocation_gate_hardening: |
+  ROOT is a PARAMETER (--root, default /opt/hindsight-kvm8). An earlier draft
+  hardcoded it, which silently no-op'd every path check under any other root and
+  made the negative fixtures report PASS on genuinely relocated releases.
+  LAUNCHER_PREFIX asks the interpreter a launcher NAMES for its own prefix
+  rather than inferring from path shape. Measured on this host: symlinking
+  venv/bin/python at a foreign venv does NOT move sys.prefix, because CPython
+  reads the pyvenv.cfg adjacent to the INVOKED path.
+  pyvenv.cfg provenance (`command = ...`) is exempt from finality but not from
+  staging: the certified fork was built from the official 0.10.1 venv, and a
+  gate that rejected that parent would reject the release it just promoted.
+rollback_semantics: |
+  ROLLBACK_OPERATION_MODE=EXPLICIT_ROLLBACK, reachable ONLY via
+  --rollback-to-official. The anti-regression guard is NOT weakened: an ordinary
+  update still requires target >= current, proven by T2/SBX8 on the identical
+  transition. The global range gate runs FIRST and unconditionally, so no
+  rollback can reach outside [0.10.0, 0.11.0). Seven preconditions: target
+  below current, no fork local label, source OFFICIAL_UPSTREAM, explicitly
+  resolved (never autodiscovered), >= canonical floor, release already exists
+  (a rollback restores, it never builds), and exact release identity.
+  There is deliberately NO ALLOW_DOWNGRADE switch: an env-exportable flag would
+  let a plain `timer --apply` disable the protection.
+source_mode_transaction: |
+  Runtime and desired source move together: snapshot both, write desired source
+  first, swap symlink, update previous, verify, check service. Any failure
+  restores BOTH, so the end state is the pre-transaction one. The two forbidden
+  mixed states (official runtime + fork desired source, and the reverse) are
+  not observable after a completed transaction. This function is the ONLY way
+  the updater writes desired source.
+terminal_state: |
+  settle_state() runs from the trap EXIT on EVERY exit path. IN_PROGRESS is
+  never terminal. Vocabulary is the updater's existing family plus the single
+  missing member FAILED_POST_PROMOTION (promotion committed, post-promotion
+  check failed) -- distinct from FAIL_ROLLED_BACK, which means the updater put
+  the old release back. A run that does not know its classification and exits 0
+  defaults conservatively to PASS_NO_UPDATE, never to PASS_UPDATED.
+invariants: |
+  - valid releases no longer fail because of innocent candidate- tokens
+  - real staging-path leakage still fails
+  - explicit rollback-to-official works in sandbox
+  - normal downgrade remains blocked without the flag
+  - source-mode transition is transactional
+  - no completed updater path leaves permanent IN_PROGRESS
+  - current fork survives timer no-op
+  - missing fork still fails closed
+  - production remains on fork and healthy
+fail_closed: |
+  relocation_gate.py absent -> updater exits 70 before any operation. A missing
+  gate must never degrade into "no relocation check". lifecycle.py absent ->
+  state settlement logs WARN and does not change the exit code. Fork without
+  artifact/hash/provenance -> BLOCKED_SOURCE_PROVENANCE, exit 2, zero mutation.
+tests:
+  relocation_r1_r8: 8
+  transition_t1_t15: 15
+  source_mode_txn_x1_x3: 3
+  terminal_state_s1_s7: 7
+  sandbox_rollback_sbx1_sbx8: 8
+  acceptance_total: 35
+  no_regression_custom_13: 69
+  no_regression_custom_14: 17
+reconciler: customizations/CUSTOM_15/relocation_gate.py
+acceptance: customizations/CUSTOM_15/test_lifecycle.py
+sandbox: customizations/CUSTOM_15/sandbox_rollback.py
+evidence: /root/hermes-audits/kvm8-hindsight-t2-5-updater-lifecycle-repair-20260928T143603Z

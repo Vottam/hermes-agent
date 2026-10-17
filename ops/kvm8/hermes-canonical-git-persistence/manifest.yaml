@@ -1,0 +1,48 @@
+schema: mastertrend.hermes-kvm8-canonical-persistence/v1
+product:
+  name: hermes-agent
+  release: 0.22.2+1.g167ec34
+  upstream_base_ref: v0.22.2
+  upstream_base_commit: d923a5eb487a17c0a68801bba9ef0f56c81040a8
+  local_statusbar_commit: 167ec345ffd5a5bd154eaf215a313f13b42c66b3
+  local_statusbar_commit_present_in_this_branch: true
+runtime:
+  python: 3.14.7+20260901
+  sqlite: 3.53.1
+  pm_install: 00574730e48a18ef
+  canonical_release_path: /opt/hermes-agent-clean.release-0.22.2-hermes-kvm8-0222-20261016T005835Z
+  legacy_runtime_fallback: prohibited
+entrypoints:
+  root_profiles: nine_converged_launchers
+  pm_launcher: <CANONICAL_RELEASE>/.hermes/bin/hermes
+  profile_home: /root/.hermes/profiles/<PROFILE>
+  dev_profile_home: /home/osm-dev/.hermes/profiles/<PROFILE>
+  audit_profile_home: /home/osm-audit/.hermes/profiles/<PROFILE>
+customizations:
+  statusbar_real_served_model: response.model -> agent._last_actual_response_model -> status bar
+  statusbar_header_fallback: enabled
+  golden_box_and_language_policy: external_private_profile_artifacts_documented_by_hash
+  model_selection_and_fallback: external_profile_configuration_not_published
+  package_manager: external_pm_install_and_launcher_templates_documented_by_hash
+  hindsight: preserve_daemon_banks_and_sqlite; no_database_files_in_git
+  legacy_paths: reject_old_checkout_and_old_runtime; no_silent_fallback
+updater:
+  source_mode: versioned_control_plane_under_ops_kvm8
+  target_mode: explicit_full_40_hex_sha_or_check_only
+  candidate: isolated_git_worktree
+  promotion: explicit_apply_only; independent_handoff_required
+  timer: disabled_by_policy_until_owner_authorizes
+  force_push: prohibited
+  destructive_pull_or_reset: prohibited
+external_configuration:
+  private_backup: restricted_kvm8_audit_backup
+  public_backup: prohibited
+  required_evidence: path_owner_mode_size_sha256_and_restore_procedure
+rollback:
+  method: restore_private_backup_or_previous_approved_release_after_gate
+  legacy_installation_reactivation: prohibited
+  byte_exact_audit_config_rollback: unavailable_for_pre_alteration_audit_copy
+health_contract:
+  gateway: unchanged
+  hindsight: unchanged
+  llm_test_calls: prohibited
