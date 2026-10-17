@@ -44,9 +44,23 @@ def install_served_model_capture(agent: Any, client: Any) -> None:
     def _on_response(response: Any) -> None:
         try:
             if 200 <= int(getattr(response, "status_code", 0)) < 300:
-                agent.last_served_model = served_model_from_headers(getattr(response, "headers", None))
+                served = served_model_from_headers(getattr(response, "headers", None))
+                if not served:
+                    # Fallback: proxies como OpenRouter nao enviam cabecalhos de roteamento,
+                    # mas colocam o modelo servido no campo ``model`` do corpo JSON da resposta.
+                    # Falha aberta: so tenta quando o conteudo e JSON (nao bloqueia streaming).
+                    content_type = str(response.headers.get("content-type", "") or "")
+                    if content_type.startswith("application/json"):
+                        try:
+                            response.read()  # corpo pode vir chunked; read() disponibiliza para json()
+                            body_model = str((response.json() or {}).get("model") or "").strip()
+                            if body_model:
+                                served = body_model
+                        except Exception:
+                            pass
+                agent.last_served_model = served or None
         except Exception:
-            logger.debug("served-model header capture skipped", exc_info=True)
+            logger.debug("served-model capture skipped", exc_info=True)
 
     setattr(_on_response, _HOOK_MARK, True)
     try:
