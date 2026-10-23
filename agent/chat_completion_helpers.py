@@ -3106,9 +3106,18 @@ class _StreamingCall(StreamingWaitMonitor):
                 _diag, chunk, model_name, response_id, upstream_provider)
             # Atualiza o modelo real no agente imediatamente para que a barra de status
             # reflita o modelo servido pelo stream (OpenRouter, Codex fallback, etc.).
-            if model_name:
+            if model_name and model_name != getattr(self.agent, "last_served_model", None):
                 self.agent.last_served_model = model_name
                 self.agent._last_actual_response_model = model_name
+                # No TUI principal, _print_fn é o método ligado da CLI. Repaint somente
+                # quando o modelo muda; sessões headless não possuem callback de UI.
+                try:
+                    cli = getattr(getattr(self.agent, "_print_fn", None), "__self__", None)
+                    invalidate = getattr(cli, "_invalidate", None)
+                    if invalidate is not None:
+                        invalidate(min_interval=0.0)
+                except Exception:
+                    logger.debug("served-model status repaint skipped", exc_info=True)
             if not chunk.choices:
                 usage, finish_reason = self._choiceless_chunk(chunk, finish_reason)
                 usage_obj = usage or usage_obj
