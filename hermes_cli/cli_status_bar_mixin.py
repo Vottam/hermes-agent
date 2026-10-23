@@ -193,7 +193,7 @@ class CLIStatusBarMixin:
         from cli import _reverse_alias_for_display, datetime, format_duration_compact
         agent = getattr(self, "agent", None)
         # Prefer the agent's model name — it updates on fallback; self.model never changes.
-        model_name = (getattr(agent, "_last_actual_response_model", None) or getattr(agent, "model", None) or self.model or t("cli.shared.unknown"))
+        model_name = (getattr(agent, "last_served_model", None) or getattr(agent, "_last_actual_response_model", None) or getattr(agent, "model", None) or self.model or t("cli.shared.unknown"))
         # Friendly display: reverse-alias from config ``model_aliases:`` first (turns long
         # Palantir RIDs into the user's short name), else slash/length truncation.
         model_short = _reverse_alias_for_display(model_name)
