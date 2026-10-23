@@ -140,7 +140,7 @@ def one_turn_runtime(override, model, runtime_kwargs, config):
 # (CALLMAP §3.3 step 4): the transform-preview original, the billing descriptor and the turn's
 # last reasoning / preview flags.
 _RESULT_PASSTHROUGH = ('pre_transform_response', 'billing_block', 'last_reasoning', 'response_previewed',
-                       'response_transformed', 'turn_exit_reason')
+                       'response_transformed', 'turn_exit_reason', 'requested_model', 'served_model')
 
 
 def classic_cli_turn(turn):

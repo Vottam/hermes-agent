@@ -148,6 +148,21 @@ event("message.start", MessageStartPayload,
       doc="A turn began streaming; an automation turn carries its async-result card.")
 
 
+class ModelServedPayload(Payload):
+    """Executor-reported model identity (``prompt_turn`` served-model callback).
+
+    ``served_model`` is optional because a provider may not identify the deployment;
+    ``requested_model`` is the configured route and is never treated as served identity.
+    """
+
+    served_model: str
+    requested_model: str | None = None
+
+
+event("model.served", ModelServedPayload,
+      doc="The executor identified the model that served the current turn.")
+
+
 class StreamDeltaPayload(Payload):
     """``prompt_turn._invoke_agent._stream`` (message.delta: ``text`` + optional ``rendered``),
     ``agent_callbacks._agent_cbs`` (reasoning.delta / thinking.delta), ``tool_progress._progress_reasoning``
@@ -288,6 +303,8 @@ class MessageCompletePayload(Payload):
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
     persisted_turn: PersistedTurn | None = None
+    requested_model: str | None = None
+    served_model: str | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")
@@ -888,7 +905,7 @@ __all__ = [
     "MoaPhasePayload", "MoaProgressPayload", "MoaReferencePayload", "NoticePayload",
     "NotificationClearPayload", "NotificationShowPayload", "OpenPayload", "PaneRevealPayload",
     "PetChangedPayload", "PetGenerateProgressPayload", "PetHatchProgressPayload", "PreviewClosePayload",
-    "PreviewOpenPayload", "PreviewRestartProgressPayload", "ReactionPayload", "ResumePhaseStatus",
+    "PreviewOpenPayload", "PreviewRestartProgressPayload", "ModelServedPayload", "ReactionPayload", "ResumePhaseStatus",
     "ReviewSummaryPayload", "SessionControlSnapshot", "SessionControlUpdatePayload",
     "SessionReclaimedPayload", "SessionResumeProgressPayload", "SessionTitlePayload", "SessionUsagePayload",
     "SetupReadyPayload", "SideAgentCompletePayload", "SkinPayload", "StatusUpdatePayload",

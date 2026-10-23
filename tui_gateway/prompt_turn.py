@@ -784,6 +784,10 @@ def _invoke_agent(
         "stream_callback": _stream,
         "persist_user_message": (
             _build_persist_user_message(prompt, images, run_message) if images else prompt)}
+    # A model identity is emitted by the executor as soon as a response/chunk identifies it;
+    # unlike text streaming this carries only non-sensitive routing metadata.
+    agent._served_model_callback = lambda model: _emit(
+        "model.served", sid, {"served_model": model, "requested_model": str(getattr(agent, "model", "") or "")})
     try:
         run_params = inspect.signature(agent.run_conversation).parameters
     except (TypeError, ValueError):
@@ -812,6 +816,7 @@ def _invoke_agent(
         with notification_turn(agent, muted=event_presentation_muted("message.delta", sid), session_id=sid):
             st.result = agent.run_conversation(run_message, **st.run_kwargs)
     finally:
+        agent._served_model_callback = None
         # Stop AND join before anything emits: a tick surviving past message.complete would
         # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
         _usage_stop.set()
@@ -917,6 +922,12 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+    requested_model = result.get("requested_model") or getattr(agent, "model", None)
+    served_model = result.get("served_model") or getattr(agent, "last_served_model", None)
+    if requested_model:
+        payload["requested_model"] = str(requested_model)
+    if served_model:
+        payload["served_model"] = str(served_model)
     if receipt := _persisted_turn_receipt(st, raw, status):
         payload["persisted_turn"] = receipt
     if last_reasoning:

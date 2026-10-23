@@ -1810,6 +1810,10 @@ def run_conversation(
     from agent.voice_turn_route import end_voice_turn_route
     from tools.vision_tools_history_budget import native_turn_images
 
+    # Each execution starts with no prior served identity. The configured route remains the
+    # fallback until this turn's executor reports a real model.
+    agent.last_served_model = None
+    agent._last_actual_response_model = None
     # Steer / redirect / interrupt set this mid-turn; the result reports whether the turn ran untouched.
     agent._turn_user_intervened = False
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so

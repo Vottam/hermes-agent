@@ -7,6 +7,7 @@ continuation guards. Nothing here imports ``agent.conversation_loop`` at module 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import contextlib
 import json
 import logging
 import re
@@ -149,7 +150,16 @@ def normalize_model_response(
     # This feeds the status bar customization that shows the actual deployment, not the alias.
     real_model_from_response = getattr(response, "model", None)
     if real_model_from_response:
-        agent._last_actual_response_model = str(real_model_from_response).strip()
+        real_model_from_response = str(real_model_from_response).strip()
+    if real_model_from_response:
+        model_changed = real_model_from_response != getattr(agent, "last_served_model", None)
+        if model_changed:
+            agent.last_served_model = real_model_from_response
+        agent._last_actual_response_model = real_model_from_response
+        with contextlib.suppress(Exception):
+            callback = getattr(agent, "_served_model_callback", None)
+            if model_changed and callable(callback):
+                callback(real_model_from_response)
     from hermes_cli.observability.shared_metrics_harness import record_reply_content
     record_reply_content(agent, response, assistant_message)
 

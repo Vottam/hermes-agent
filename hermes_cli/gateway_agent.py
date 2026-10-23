@@ -35,7 +35,7 @@ _RESULT_DEFAULTS = {
     "completed": True, "interrupted": False, "interrupt_message": None, "api_calls": 0,
     "pending_steer": None, "last_reasoning": None, "response_previewed": False,
     "response_transformed": False, "pre_transform_response": None, "billing_block": None,
-    "auxiliary_usage": {},
+    "auxiliary_usage": {}, "requested_model": None, "served_model": None,
 }
 # ``session.usage`` / ``session.stats`` (wave_a2 contract, session-cumulative) → the agent attributes
 # main's status bar, spinner (``↓ N tok``) and /usage read off ``AIAgent``.
@@ -108,6 +108,9 @@ class GatewayAgent:
         self.session_id = session_id
         self.model = model or ""
         self.provider = provider or ""
+        self.last_served_model = None
+        self._last_actual_response_model = None
+        self._served_model_callback = None
         self.base_url = base_url or ""
         self.api_mode = api_mode
         self.api_key = None  # never on this side of the wire
@@ -453,6 +456,29 @@ class GatewayAgent:
             return
         state.service_tier_sent = wanted
 
+    def _set_served_model(self, model):
+        """Install executor identity and repaint only when it changes.
+
+        ``None`` is deliberate at turn start: the configured model remains the fallback;
+        the client must not display the previous turn's served deployment as current.
+        """
+        served = str(model or "").strip() or None
+        if served == self.last_served_model:
+            return
+        self.last_served_model = served
+        self._last_actual_response_model = served
+        try:
+            cli = getattr(getattr(self, "_print_fn", None), "__self__", None)
+            invalidate = getattr(cli, "_invalidate", None)
+            if invalidate is not None:
+                invalidate(min_interval=0.0)
+        except Exception:
+            logger.debug("served-model status repaint skipped", exc_info=True)
+
+    def _on_served_model(self, payload, stream_callback=None, starts=None):
+        if isinstance(payload, dict) and payload.get("served_model"):
+            self._set_served_model(payload["served_model"])
+
     # -- snapshot-backed reads ---------------------------------------------------------------
     def _state(self):
         return self.connection.state(self.session_id)
@@ -514,6 +540,8 @@ class GatewayAgent:
             self._api_output_history = [float(tps) * float(latency)]
         if "rate_limit" in usage:
             self._rate_limit_state = _rate_limit_state(usage.get("rate_limit"))
+        if usage.get("served_model"):
+            self._set_served_model(usage["served_model"])
         if usage.get("model"):
             self.model = usage["model"]
         if usage.get("provider"):
@@ -739,6 +767,7 @@ class GatewayAgent:
     def run_conversation(self, user_message, conversation_history=None, stream_callback=None,
                          task_id=None, persist_user_message=None, turn_author=None, **_kw):
         turn = self._turn = _Turn(self.session_id)  # first: a turn main gave up on stops consuming
+        self._set_served_model(None)
         history = list(conversation_history or [])
         self._turn_ask_index = len(history)  # the staged ask's row in this turn's transcript
         self._turn_api_calls = None
@@ -1250,6 +1279,12 @@ class GatewayAgent:
         if not suffix and out.get("final_response") and not out.get("failed"):
             out["messages"].append({"role": "assistant", "content": out["final_response"]})
         out["session_id"] = self.session_id
+        if out.get("served_model"):
+            self._set_served_model(out["served_model"])
+        # A receipt may be the first complete frame after a replay gap; install its identity
+        # before the caller snapshots the result.
+        if out.get("requested_model") and not self.model:
+            self.model = out["requested_model"]
         if not self._owns(turn):  # taken over during that read: the newer turn's state stays untouched
             return out
         self._session_messages = out["messages"]
@@ -1427,6 +1462,7 @@ _SERVER_REQUESTS = {
 
 _HANDLERS = {
     "message.delta": GatewayAgent._on_delta,
+    "model.served": GatewayAgent._on_served_model,
     "message.interim": GatewayAgent._on_interim,
     "tool.generating": GatewayAgent._on_tool_generating,
     "tool.progress": GatewayAgent._on_tool_progress,

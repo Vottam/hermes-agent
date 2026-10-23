@@ -3109,7 +3109,13 @@ class _StreamingCall(StreamingWaitMonitor):
             if model_name and model_name != getattr(self.agent, "last_served_model", None):
                 self.agent.last_served_model = model_name
                 self.agent._last_actual_response_model = model_name
-                # No TUI principal, _print_fn é o método ligado da CLI. Repaint somente
+                try:
+                    callback = getattr(self.agent, "_served_model_callback", None)
+                    if callable(callback):
+                        callback(model_name)
+                except Exception:
+                    logger.debug("served-model gateway event skipped", exc_info=True)
+                # No TUI principal, _print_fn e o metodo ligado da CLI. Repaint somente
                 # quando o modelo muda; sessões headless não possuem callback de UI.
                 try:
                     cli = getattr(getattr(self.agent, "_print_fn", None), "__self__", None)
