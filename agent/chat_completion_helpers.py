@@ -3104,6 +3104,11 @@ class _StreamingCall(StreamingWaitMonitor):
                 continue
             model_name, response_id, upstream_provider = self._chunk_identity(
                 _diag, chunk, model_name, response_id, upstream_provider)
+            # Atualiza o modelo real no agente imediatamente para que a barra de status
+            # reflita o modelo servido pelo stream (OpenRouter, Codex fallback, etc.).
+            if model_name:
+                self.agent.last_served_model = model_name
+                self.agent._last_actual_response_model = model_name
             if not chunk.choices:
                 usage, finish_reason = self._choiceless_chunk(chunk, finish_reason)
                 usage_obj = usage or usage_obj
